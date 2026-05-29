@@ -206,6 +206,10 @@ class FTMOGame:
         # Avoids repeated O(log N) binary searches during sequential playback.
         self._lookup_cache: Dict[Tuple[str, int], int] = {}
 
+        # Performance monitoring
+        self.step_count = 0
+        self._realised_pnl = 0.0
+
         self.reset()
 
     # ── index helpers ─────────────────────────────────────────────────────────
@@ -221,12 +225,29 @@ class FTMOGame:
         cached_idx = self._lookup_cache.get(key, 0)
         idx_arr = df.index
         n = len(idx_arr)
+
+        # A8: Validate dataframe is sorted
+        assert df.index.is_monotonic_increasing, f"[A8] df[{symbol}, {tf}] index is not monotonic!"
+        # A1: Validate cache bounds
+        assert 0 <= cached_idx < n, f"[A1] Cache out of bounds: {cached_idx} not in [0, {n})"
+
         # Walk forward from cache — O(1) amortised during sequential playback
         while cached_idx + 1 < n and idx_arr[cached_idx + 1] <= t:
             cached_idx += 1
+
         # Clamp: if cache is ahead of t, fall back to binary search
         if cached_idx >= n or idx_arr[cached_idx] > t:
             cached_idx = df.index.searchsorted(t, side="right") - 1
+            # A7: Trace cache fallback for debugging
+            if self.step_count % 10000 == 0:
+                print(f"[A7] _lookup_row({symbol}, {tf}): binary search fallback at curr_idx={self.curr_idx}, cached_idx was {self._lookup_cache.get(key, 0)}")
+
+        # A4: Validate result is at correct boundary
+        if cached_idx >= 0:
+            assert idx_arr[cached_idx] <= t, f"[A4] Cache result {idx_arr[cached_idx]} > {t}"
+            if cached_idx < n - 1:
+                assert idx_arr[cached_idx + 1] > t, f"[A4] Cache skipped row at {idx_arr[cached_idx + 1]}"
+
         self._lookup_cache[key] = cached_idx
         if cached_idx < 0:
             return None
@@ -309,6 +330,10 @@ class FTMOGame:
 
     # ── state assembly ────────────────────────────────────────────────────────
     def _assemble_state(self) -> np.ndarray:
+        # A9: Validate cache size doesn't grow unbounded
+        assert len(self._lookup_cache) <= len(self.symbols) * len(self.data_dict[self.symbols[0]]) * 1.5, \
+            f"[A9] Cache unbounded: {len(self._lookup_cache)} entries, expected <= {len(self.symbols) * 4}"
+
         parts = []
         for sym in self.symbols:
             for tf in [1440, 60, 15, 1]:
@@ -321,6 +346,12 @@ class FTMOGame:
                 start_idx = max(0, end_idx - self.lkbk)
                 df        = self.data_dict[sym][tf]
                 window    = df.iloc[start_idx:end_idx]
+
+                # A6: Validate cache result matches expectation
+                if len(window) > 0:
+                    assert df.index[end_idx - 1] == row.name, \
+                        f"[A6] Cache mismatch: row {row.name} != cached {df.index[end_idx - 1]}"
+
                 arr       = window.select_dtypes(include=[np.number]).values
                 arr       = arr[-min(10, len(arr)):]   # last 10 rows
                 arr       = arr.flatten()
@@ -503,7 +534,18 @@ class FTMOGame:
 
     def step(self):
         """Advance the clock by one 1m bar."""
+        # B4: Guard against out-of-bounds
+        base_len = len(self.data_dict[self.symbols[0]][1])
+        if self.curr_idx + 1 >= base_len:
+            self.is_over = True
+            return
+
         self.curr_idx += 1
+        self.step_count += 1
+
+        # D5: Verify cache state is sensible
+        assert len(self._lookup_cache) <= len(self.symbols) * 4 * 2, \
+            f"[D5] Cache grew unexpectedly: {len(self._lookup_cache)} entries"
 
     def reset(self):
         self.curr_idx       = self.init_idx
@@ -522,6 +564,19 @@ class FTMOGame:
         self.is_over        = False
         self.reward         = 0.0
         self.trade_log      = []
+
+        # D3: Comprehensive cache reset with validation
+        cache_size_before = len(self._lookup_cache)
         self._lookup_cache  = {}   # invalidate cache on reset
+
+        # D5: Validate reset state
+        assert len(self._lookup_cache) == 0, "[D5] Cache not cleared on reset"
+        assert all(p.side == 0 for p in self.positions.values()), "[D5] Positions not cleared on reset"
+        assert self._realised_pnl == 0.0, "[D5] PnL not reset"
+        assert self.curr_idx == self.init_idx, "[D5] curr_idx not reset to init_idx"
+
+        # B1: Log episode boundary for traceability
+        print(f"[B1] reset() at step={self.step_count}: cache_size_before={cache_size_before}, curr_idx={self.curr_idx}")
+
         # advance to init_idx
         self._check_day_boundary()

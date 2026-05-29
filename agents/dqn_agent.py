@@ -64,6 +64,11 @@ class ExperienceReplay:
         # Single batched predict call each — eliminates per-sample overhead
         targets  = r_net.predict(inputs, verbose=0)
         q_next   = q_net.predict(next_states, verbose=0)
+
+        # E4: Shape validation
+        assert targets.shape[0] == bs, f"[E4] targets rows {targets.shape[0]} != bs {bs}"
+        assert q_next.shape[0] == bs,  f"[E4] q_next rows {q_next.shape[0]} != bs {bs}"
+
         q_max    = q_next.max(axis=1)
 
         for i in range(bs):
@@ -142,6 +147,9 @@ class DQNAgent:
             return {s: np.random.randint(0, NUM_ACTIONS) for s in self.symbols}
 
         q_vals = self.q_net(state, training=False).numpy()[0]  # shape: (num_assets * NUM_ACTIONS,)
+        # E1: Guard against model divergence
+        assert not np.isnan(q_vals).any(), f"[E1] Q-values contain NaN — model may have diverged"
+        assert not np.isinf(q_vals).any(), f"[E1] Q-values contain Inf — model may have diverged"
         q_mat  = q_vals.reshape(self.num_assets, NUM_ACTIONS)
         return {self.symbols[i]: int(np.argmax(q_mat[i])) for i in range(self.num_assets)}
 
