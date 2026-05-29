@@ -1,0 +1,21 @@
+{
+  "sharpe": -29.9092,
+  "sortino": -12.7254,
+  "max_dd": 0.0027,
+  "max_dd_duration_bars": 49,
+  "profit_factor": 0.0171,
+  "hit_rate": 0.1282,
+  "avg_win_loss_ratio": 0.1158,
+  "recovery_bars": 0,
+  "total_trades": 1685,
+  "pass_rate": 0.0,
+  "total_fees": 277.8963494130546,
+  "date_from": "2023-01-01",
+  "date_to": "2023-02-28",
+  "symbols": [
+    "EURUSD",
+    "GBPUSD",
+    "XAUUSD",
+    "US30"
+  ]
+}

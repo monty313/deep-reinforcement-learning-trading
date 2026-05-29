@@ -1,0 +1,22 @@
+{
+  "live_data_source": "simulated (no live CSV provided)",
+  "backtest": {
+    "sharpe": -29.9092,
+    "mean_return": -5.4e-05,
+    "std_return": 2.8e-05,
+    "pass_rate": 0.0,
+    "max_dd": 0.0001
+  },
+  "live": {
+    "sharpe": -1705.0685,
+    "mean_return": -0.003054,
+    "std_return": 2.8e-05,
+    "pass_rate": 0.0,
+    "max_dd": 0.0001
+  },
+  "sharpe_delta": 1675.1593,
+  "pct_degradation": -5600.82,
+  "alert": false,
+  "alert_message": "OK",
+  "assumed_daily_slippage_pct": 0.3
+}
