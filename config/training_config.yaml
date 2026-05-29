@@ -1,6 +1,5 @@
 
 # ── Symbols to train on ────────────────────────────────────────────────────────
-# Change this list to select which instruments to include.
 symbols:
   - EURUSD
   - GBPUSD
@@ -8,7 +7,6 @@ symbols:
   - US30
 
 # ── CSV file map ───────────────────────────────────────────────────────────────
-# Filenames relative to the project root (or set data_dir below).
 csv_map:
   EURUSD: "EURUSD_M1_202101131130_202605270000_2020_2026.csv"
   GBPUSD: "GBPUSD_M1_202101131952_202605270000.csv"
@@ -19,27 +17,21 @@ csv_map:
 data_dir: null
 
 # ── Date splits ────────────────────────────────────────────────────────────────
-# All dates are CET/CEST boundaries.
 dates:
-  train_start: "2021-02-01"    # earliest common date across all 4 symbols
+  train_start: "2021-02-01"
   train_end:   "2024-06-30"
   val_start:   "2024-07-01"
   val_end:     "2025-03-31"
   fwd_start:   "2025-04-01"
-  fwd_end:     null             # null = present
+  fwd_end:     null
 
 # ── FTMO profile ───────────────────────────────────────────────────────────────
 TRADING_MODE: "ftmo"
 FTMO:
-  # Daily profit target (as decimal: 0.025 = 2.5%)
   daily_profit_target_pct: 0.025
-  # Max intraday drawdown (trailing DD from intraday high)
   daily_max_drawdown_pct:  0.010
-  # Training mode: can continue trading past target if trailing DD not breached
-  # Live MT5 mode: HARD STOP at profit target or on DD breach
   training_mode: true
-  # Position sizing relative to daily profit target
-  position_scale_factor: 0.33  # size = (daily_target * scale_factor) / num_symbols
+  position_scale_factor: 0.33
 
 # ── Reward weights ─────────────────────────────────────────────────────────────
 REWARD:
@@ -49,21 +41,20 @@ REWARD:
   streak_scale:          0.1
   low_dd_threshold:      0.005
   low_dd_bonus:          0.3
-  # Sharpe bonus (optional — only fires on passing FTMO days)
   sharpe_bonus_enabled:  false
-  sharpe_bonus_scale:    0.1    # reward += 0.1 * (rolling_sharpe - 1.0)
-  sharpe_ath_bonus:      0.2    # reward += 0.2 on new all-time-high Sharpe
+  sharpe_bonus_scale:    0.1
+  sharpe_ath_bonus:      0.2
 
 # ── Kill switches ───────────────────────────────────────────────────────────────
 KILL_THRESHOLDS:
-  equity_dd_pct:          5.0   # kill if equity down 5% from peak
-  consecutive_losses:     5     # kill if 5+ losing trades in a row
-  daily_loss_pct:         3.0   # kill if down 3% in single day
+  equity_dd_pct:          5.0
+  consecutive_losses:     5
+  daily_loss_pct:         3.0
 
-# ── Alert webhook (set URL to enable Slack/email notifications) ─────────────────
+# ── Alert webhook ───────────────────────────────────────────────────────────────
 ALERTS:
-  webhook_url: null             # e.g. https://hooks.slack.com/...
-  log_to_file: true             # always log alerts to alerts.log
+  webhook_url: null
+  log_to_file: true
 
 # ── DQN hyper-parameters ──────────────────────────────────────────────────────
 RL:
@@ -96,23 +87,56 @@ CURRICULUM:
   advance_consecutive_pass_days: 5
   max_episodes_per_phase: 500
   max_episode_steps: 5000
+  max_trades_per_day: 800
+
   phases:
+    - id: 0
+      name: "CCI Extreme Gate"
+      mask: "phase0_cci_extreme"
+      mask_type: "force_in_and_gate"
+      tfs: [1, 15]
+
     - id: 1
-      name: "CCI alignment (1m+15m)"
-      mask: "phase1_cci"
-      reward_function: "reward_ftmo_pnl"
+      name: "CCI Directional Alignment"
+      mask: "phase1_cci_align"
+      mask_type: "open_gate"
+      tfs: [1, 15]
+
     - id: 2
-      name: "SMA on BB upper band (1m+1H)"
-      mask: "phase2_bb_upper"
-      reward_function: "reward_ftmo_pnl"
+      name: "Lagged High/Low SMA - Trend"
+      mask: "phase2_hilo_trend"
+      mask_type: "force_in_and_gate"
+      tfs: [1, 30]
+
     - id: 3
-      name: "BB midlines (1m+15m)"
-      mask: "phase3_bb_mid"
-      reward_function: "reward_ftmo_pnl"
+      name: "Lagged High/Low SMA - Counter TF"
+      mask: "phase3_hilo_counter"
+      mask_type: "force_in_and_gate"
+      tfs: [1, 15]
+
     - id: 4
-      name: "FTMO consistency (no mask)"
+      name: "Bollinger Band Position"
+      mask: "phase4_bb_position"
+      mask_type: "force_in_and_gate"
+      tfs: [1, 15]
+
+    - id: 5
+      name: "SMA Stack Alignment"
+      mask: "phase5_sma_stack"
+      mask_type: "force_in_and_gate"
+      tfs: [1, 60]
+
+    - id: 6
+      name: "ATR Expansion"
+      mask: "phase6_atr_expansion"
+      mask_type: "force_in_and_gate"
+      tfs: [1, 60]
+
+    - id: 7
+      name: "Full FTMO - No Mask"
       mask: null
-      reward_function: "reward_ftmo_pnl"
+      mask_type: "free"
+      tfs: []
 
 # ── Output paths ───────────────────────────────────────────────────────────────
 PATHS:
@@ -120,4 +144,4 @@ PATHS:
   trade_logs_dir: "trade_logs"
   shap_logs_dir:  "shap_logs"
   data_cache_dir: "data_cache"
-  metrics_file:   "metrics.csv"
+  metrics_file:   "outputs/metrics.csv"

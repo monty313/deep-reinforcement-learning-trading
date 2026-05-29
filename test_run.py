@@ -76,7 +76,7 @@ env0 = FTMOGame(
     reward_cfg       = cfg["REWARD"],
     ftmo_cfg         = ftmo_cfg,
     trading_mode     = cfg["TRADING_MODE"],
-    curriculum_phase = 4,          # no masking for smoke test
+    curriculum_phase = 7,          # no masking for smoke test
     risk_fractions   = cfg["ACTIONS"]["risk_fractions"],
     lkbk             = rl_cfg["LKBK"],
     init_idx         = init_idx,
@@ -166,6 +166,7 @@ daily["result"]     = daily.apply(
 daily["symbols"]    = str(symbols)
 
 out_path = Path(cfg["PATHS"]["metrics_file"])
+out_path.parent.mkdir(parents=True, exist_ok=True)
 daily.to_csv(out_path, index=False)
 print(f"\nOK metrics.csv written to {out_path.resolve()}")
 print(daily[["date", "daily_return_pct", "daily_max_dd_pct", "result"]].to_string(index=False))

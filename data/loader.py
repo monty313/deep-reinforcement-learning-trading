@@ -32,6 +32,7 @@ OHLCV_AGG = {
 RESAMPLE_RULES = {
     1:    "1min",
     15:   "15min",
+    30:   "30min",
     60:   "1h",
     1440: "1d",
 }
@@ -165,7 +166,7 @@ def load_one(
     if csv_map is None:
         csv_map = DEFAULT_CSV_MAP
     if timeframes is None:
-        timeframes = [1, 15, 60, 1440]
+        timeframes = [1, 15, 30, 60, 1440]
 
     csv_path = _find_csv(symbol, csv_map, data_dir)
     print(f"\n[START] Loading {symbol}  ({csv_path.name})", flush=True)
@@ -210,7 +211,7 @@ def load_all(
     if csv_map is None:
         csv_map = DEFAULT_CSV_MAP
     if timeframes is None:
-        timeframes = [1, 15, 60, 1440]
+        timeframes = [1, 15, 30, 60, 1440]
 
     data: Dict[str, Dict[int, pd.DataFrame]] = {}
     total_start = time.perf_counter()

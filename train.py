@@ -159,7 +159,7 @@ def main():
         reward_cfg       = cfg["REWARD"],
         ftmo_cfg         = ftmo_cfg,
         trading_mode     = cfg["TRADING_MODE"],
-        curriculum_phase = 1,
+        curriculum_phase = 0,
         risk_fractions   = cfg["ACTIONS"]["risk_fractions"],
         lkbk             = rl_cfg["LKBK"],
         init_idx         = init_idx,
@@ -198,7 +198,7 @@ def main():
             advance_days = advance,
         )
         paths = _paths(cfg, phase_cfg["id"], run_id)
-        if phase_cfg["id"] < 4:
+        if phase_cfg["id"] < 7:
             agent.load(paths["weights"], paths["replay"], paths["risk"],
                        freeze_layers=args.freeze_layers)
     _done("Stage 6/8 — Curriculum training", t0)

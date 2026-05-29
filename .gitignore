@@ -6,8 +6,9 @@
 *_D1_*.csv
 
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
+*.pyc
 *.pyo
 *.pyd
 .Python
@@ -19,7 +20,6 @@ build/
 # Virtual environments
 venv/
 .venv/
-env/
 .env
 
 # Jupyter
@@ -32,7 +32,13 @@ checkpoints/
 *.pt
 *.onnx
 
-# Generated reports (optional — remove lines below to track them)
+# Training outputs
+outputs/
+trade_logs/
+data_cache/
+shap_logs/
+
+# Generated reports
 metrics_summary.json
 tail_risk_report.json
 slippage_impact_report.json

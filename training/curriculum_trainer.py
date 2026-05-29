@@ -1,7 +1,7 @@
 """
 training/curriculum_trainer.py
-4-phase curriculum trainer with transfer learning and optional Ray parallel runs.
-Advance criteria: 10 consecutive FTMO pass-days in current phase.
+8-phase curriculum trainer with transfer learning and optional Ray parallel runs.
+Advance criteria: 5 consecutive FTMO pass-days in current phase (or 500 ep cap).
 """
 
 from __future__ import annotations
@@ -72,16 +72,19 @@ def run_phase(
 
     # Build environment for this phase
     training_mode = cfg["FTMO"].get("training_mode", True)
+    max_trades_per_day = cfg.get("CURRICULUM", {}).get("max_trades_per_day", 800)
     env = FTMOGame(
-        data_dict        = data_dict,
-        symbols          = symbols,
-        reward_cfg       = reward_cfg,
-        ftmo_cfg         = ftmo_cfg,
-        trading_mode     = cfg["TRADING_MODE"],
-        curriculum_phase = phase_id,
-        risk_fractions   = agent.risk_fractions,
-        lkbk             = rl_cfg["LKBK"],
-        training_mode    = training_mode,  # Pass training mode for curriculum
+        data_dict          = data_dict,
+        symbols            = symbols,
+        reward_cfg         = reward_cfg,
+        ftmo_cfg           = ftmo_cfg,
+        trading_mode       = cfg["TRADING_MODE"],
+        curriculum_phase   = phase_id,
+        risk_fractions     = agent.risk_fractions,
+        lkbk               = rl_cfg["LKBK"],
+        training_mode      = training_mode,
+        phase_cfg          = phase_cfg,
+        max_trades_per_day = max_trades_per_day,
     )
 
     consecutive_pass    = 0
@@ -219,7 +222,7 @@ def run_curriculum(
     env0 = FTMOGame(
         data_dict=data_dict, symbols=symbols,
         reward_cfg=cfg["REWARD"], ftmo_cfg=ftmo_cfg,
-        trading_mode=cfg["TRADING_MODE"], curriculum_phase=1,
+        trading_mode=cfg["TRADING_MODE"], curriculum_phase=0,
         lkbk=rl_cfg["LKBK"],
         training_mode=training_mode,
     )
@@ -245,7 +248,7 @@ def run_curriculum(
         agent = run_phase(phase_cfg, data_dict, cfg, agent, logger, run_id, advance)
         # Transfer: reload with freeze for next phase
         paths = _paths(cfg, phase_cfg["id"], run_id)
-        if phase_cfg["id"] < 4:
+        if phase_cfg["id"] < 7:
             agent.load(paths["weights"], paths["replay"], paths["risk"],
                        freeze_layers=freeze_layers)
 
@@ -275,9 +278,9 @@ def forward_test(
     env = FTMOGame(
         data_dict=data_dict, symbols=symbols,
         reward_cfg=cfg["REWARD"], ftmo_cfg=ftmo_cfg,
-        trading_mode=cfg["TRADING_MODE"], curriculum_phase=4,
+        trading_mode=cfg["TRADING_MODE"], curriculum_phase=7,
         lkbk=cfg["RL"]["LKBK"],
-        training_mode=False,  # Live mode: hard stop on daily target
+        training_mode=False,
     )
 
     env.reset()
