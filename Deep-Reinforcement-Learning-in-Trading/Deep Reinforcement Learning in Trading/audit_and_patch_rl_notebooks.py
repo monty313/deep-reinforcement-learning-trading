@@ -18,7 +18,7 @@ replacement_map = {
 ftmo_insert = [
     "    'FTMO_COST': 0.001,\n",
     "    'FTMO_LOT': 1.0,\n",
-    "    'MAX_DRAWNDOWN': 0.01,\n",
+    "    'MAX_DRAWDOWN': 0.01,\n",
     "    'MAX_LOSS_PER_TRADE': 0.01,\n",
     "    'MAX_TRADE_LEN': 60,\n",
 ]
@@ -47,14 +47,14 @@ for p in sorted(root.rglob('*.ipynb')):
                 '           lkbk=LKBK, init_idx=START_IDX,\n'
                 '           ftmo_cost=rl_config.get(\'FTMO_COST\', 0.001),\n'
                 '           ftmo_lot=rl_config.get(\'FTMO_LOT\', 1.0),\n'
-                '           max_drawdown=rl_config.get(\'MAX_DRAWNDOWN\', None),\n'
+                '           max_drawdown=rl_config.get(\'MAX_DRAWDOWN\', None),\n'
                 '           max_loss_per_trade=rl_config.get(\'MAX_LOSS_PER_TRADE\', None),\n'
                 '           max_trade_len=rl_config.get(\'MAX_TRADE_LEN\', None))'
             )
         if "env = Game(bars5m, bars1d, bars1h, rl_config['RF'],\n               lkbk=rl_config['LKBK'], init_idx=rl_config['START_IDX'])" in new:
             new = new.replace(
                 "env = Game(bars5m, bars1d, bars1h, rl_config['RF'],\n               lkbk=rl_config['LKBK'], init_idx=rl_config['START_IDX'])",
-                "env = Game(bars5m, bars1d, bars1h, rl_config['RF'],\n               lkbk=rl_config['LKBK'], init_idx=rl_config['START_IDX'],\n               ftmo_cost=rl_config.get('FTMO_COST', 0.001),\n               ftmo_lot=rl_config.get('FTMO_LOT', 1.0),\n               max_drawdown=rl_config.get('MAX_DRAWNDOWN', None),\n               max_loss_per_trade=rl_config.get('MAX_LOSS_PER_TRADE', None),\n               max_trade_len=rl_config.get('MAX_TRADE_LEN', None))"
+                "env = Game(bars5m, bars1d, bars1h, rl_config['RF'],\n               lkbk=rl_config['LKBK'], init_idx=rl_config['START_IDX'],\n               ftmo_cost=rl_config.get('FTMO_COST', 0.001),\n               ftmo_lot=rl_config.get('FTMO_LOT', 1.0),\n               max_drawdown=rl_config.get('MAX_DRAWDOWN', None),\n               max_loss_per_trade=rl_config.get('MAX_LOSS_PER_TRADE', None),\n               max_trade_len=rl_config.get('MAX_TRADE_LEN', None))"
             )
         if new != src:
             cell['source'] = new.splitlines(True)

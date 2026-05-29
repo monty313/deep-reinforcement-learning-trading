@@ -34,7 +34,7 @@ def normalize_ftmo_transaction_cost(ftmo_cost, entry, lots=1.0):
 def get_pnl(entry, curr, pos, ftmo_cost=0.001, lots=1.0):
     # Transaction cost and commissions
     tc = normalize_ftmo_transaction_cost(ftmo_cost, entry, lots)
-    return (curr*(1-tc) - entry*(1+tc))/entry*(1+tc)*pos
+    return (curr*(1-tc) - entry*(1+tc)) / (entry*(1+tc)) * pos
 
 
 def reward_pos_log_pnl(entry, curr, pos, ftmo_cost=0.001, lots=1.0):
@@ -223,8 +223,8 @@ class Game(object):
         on the lookback we've specified.
         '''
         wdw5m = 9
-        wdw1h = np.ceil(self.lkbk*15/24.)
-        wdw1d = np.ceil(self.lkbk*15)
+        wdw1h = int(np.ceil(self.lkbk*15/24.))
+        wdw1d = int(np.ceil(self.lkbk*15))
 
         """---Getting candlesticks before current time---"""
         self.last5m = self.bars5m[self.curr_time -
@@ -304,7 +304,6 @@ class Game(object):
         self._get_last_N_timebars()
         self.position = 0
         self.act(0)
-        self.state = []
         self._assemble_state()
 
 
