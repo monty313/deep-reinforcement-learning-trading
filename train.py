@@ -17,10 +17,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 import yaml
+from tqdm.auto import tqdm
 
 # ── project root on path ──────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
@@ -79,46 +81,65 @@ def main():
     dates     = cfg["dates"]
     run_id    = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    print(f"\n{'='*60}")
-    print(f"  FTMO RL Training  |  run_id: {run_id}")
-    print(f"  Symbols : {symbols}")
-    print(f"  Train   : {dates['train_start']} -> {dates['train_end']}")
-    print(f"  Val     : {dates['val_start']}   -> {dates['val_end']}")
-    print(f"  Fwd     : {dates['fwd_start']}   -> present")
-    print(f"{'='*60}\n")
+    RUN_START = time.perf_counter()
+
+    def _stage(label: str) -> float:
+        """Print a stage banner and return the start time."""
+        t = time.perf_counter()
+        print(f"\n{'─'*60}", flush=True)
+        print(f"[START] {label}", flush=True)
+        return t
+
+    def _done(label: str, t0: float):
+        elapsed = time.perf_counter() - t0
+        print(f"[DONE]  {label}  ({elapsed:.1f}s / {elapsed/60:.1f} min)", flush=True)
+
+    print(f"\n{'='*60}", flush=True)
+    print(f"  FTMO RL Training  |  run_id: {run_id}", flush=True)
+    print(f"  Symbols : {symbols}", flush=True)
+    print(f"  Train   : {dates['train_start']} -> {dates['train_end']}", flush=True)
+    print(f"  Val     : {dates['val_start']}   -> {dates['val_end']}", flush=True)
+    print(f"  Fwd     : {dates['fwd_start']}   -> present", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
     # ── 1. Load raw CSVs ──────────────────────────────────────────────────────
-    print("Loading CSVs ...")
+    t0 = _stage("Stage 1/8 — Load raw CSVs")
     raw_data = load_all(
         symbols    = symbols,
         csv_map    = cfg.get("csv_map"),
         data_dir   = cfg.get("data_dir"),
         date_from  = dates["train_start"],
-        date_to    = dates.get("fwd_end"),   # load full range; slice later
+        date_to    = dates.get("fwd_end"),
     )
+    _done("Stage 1/8 — Load raw CSVs", t0)
 
     # ── 2. Build indicator features ───────────────────────────────────────────
-    print("\nBuilding features ...")
+    t0 = _stage("Stage 2/8 — Build indicator features")
     feature_data = build_feature_data(raw_data, symbols)
+    _done("Stage 2/8 — Build indicator features", t0)
 
     # ── 3. Split into train / val / fwd ──────────────────────────────────────
+    t0 = _stage("Stage 3/8 — Slice train / val / fwd windows")
     train_data = slice_feature_data(feature_data, dates["train_start"], dates["train_end"])
     val_data   = slice_feature_data(feature_data, dates["val_start"],   dates["val_end"])
     fwd_data   = slice_feature_data(feature_data, dates["fwd_start"],   dates.get("fwd_end"))
+    _done("Stage 3/8 — Slice windows", t0)
 
     # ── 4. Compute warm-up offset ─────────────────────────────────────────────
+    t0 = _stage("Stage 4/8 — Compute warm-up offset")
     init_idx = compute_init_idx(train_data, symbols)
-    print(f"\nWarm-up offset (init_idx): {init_idx}")
+    print(f"  init_idx = {init_idx}", flush=True)
+    _done("Stage 4/8 — Warm-up offset", t0)
 
     # ── 5. Build agent ────────────────────────────────────────────────────────
+    t0 = _stage("Stage 5/8 — Build DQN agent")
     ftmo_cfg = {
         "profit_target_pct": cfg["FTMO"]["daily_profit_target_pct"],
         "max_dd_pct":        cfg["FTMO"]["daily_max_drawdown_pct"],
     }
-    training_mode_rl = cfg["FTMO"].get("training_mode", True)  # True for training, False for live MT5
+    training_mode_rl = cfg["FTMO"].get("training_mode", True)
     rl_cfg = cfg["RL"]
 
-    # Probe state_dim from a dummy env
     dummy_env = FTMOGame(
         data_dict        = train_data,
         symbols          = symbols,
@@ -129,10 +150,10 @@ def main():
         risk_fractions   = cfg["ACTIONS"]["risk_fractions"],
         lkbk             = rl_cfg["LKBK"],
         init_idx         = init_idx,
-        training_mode    = training_mode_rl,  # Pass training mode
+        training_mode    = training_mode_rl,
     )
     state_dim = dummy_env.get_state().shape[1]
-    print(f"State dimension: {state_dim}")
+    print(f"  State dimension: {state_dim}", flush=True)
 
     agent = DQNAgent(
         symbols        = symbols,
@@ -140,6 +161,7 @@ def main():
         rl_config      = rl_cfg,
         risk_fractions = cfg["ACTIONS"]["risk_fractions"],
     )
+    _done("Stage 5/8 — Build DQN agent", t0)
 
     # Optionally preload from a previous phase
     if rl_cfg.get("PRELOAD") and args.phase > 1:
@@ -148,39 +170,43 @@ def main():
                    freeze_layers=args.freeze_layers)
 
     # ── 6. Run curriculum phases ──────────────────────────────────────────────
-    advance = cfg["CURRICULUM"]["advance_consecutive_pass_days"]
+    advance      = cfg["CURRICULUM"]["advance_consecutive_pass_days"]
+    phases_to_run = [p for p in cfg["CURRICULUM"]["phases"] if p["id"] >= args.phase]
 
-    for phase_cfg in cfg["CURRICULUM"]["phases"]:
-        if phase_cfg["id"] < args.phase:
-            continue
-
+    t0 = _stage(f"Stage 6/8 — Curriculum training ({len(phases_to_run)} phases)")
+    for phase_cfg in tqdm(phases_to_run, desc="Curriculum phases", unit="phase"):
         agent = run_phase(
             phase_cfg    = phase_cfg,
             data_dict    = train_data,
             cfg          = cfg,
             agent        = agent,
-            logger       = None,             # set to WandbLogger(cfg, run_id) to enable W&B
+            logger       = None,
             run_id       = run_id,
             advance_days = advance,
         )
-
-        # Transfer weights to next phase
         paths = _paths(cfg, phase_cfg["id"], run_id)
         if phase_cfg["id"] < 4:
             agent.load(paths["weights"], paths["replay"], paths["risk"],
                        freeze_layers=args.freeze_layers)
+    _done("Stage 6/8 — Curriculum training", t0)
 
     # ── 7. Forward test ───────────────────────────────────────────────────────
-    print("\nRunning forward test ...")
+    t0 = _stage("Stage 7/8 — Forward test (inference, no weight updates)")
     fwd_df = forward_test(str(cfg_path), fwd_data, agent, run_id=run_id)
-    print(f"Forward test rows: {len(fwd_df)}")
+    print(f"  Forward test rows: {len(fwd_df)}", flush=True)
+    _done("Stage 7/8 — Forward test", t0)
 
-    # ── 8. Validation run (inference only) ───────────────────────────────────
-    print("\nRunning validation ...")
+    # ── 8. Validation run ─────────────────────────────────────────────────────
+    t0 = _stage("Stage 8/8 — Validation run")
     val_df = forward_test(str(cfg_path), val_data, agent, run_id=f"{run_id}_val")
-    print(f"Validation rows: {len(val_df)}")
+    print(f"  Validation rows: {len(val_df)}", flush=True)
+    _done("Stage 8/8 — Validation run", t0)
 
-    print(f"\nOK Training complete — run_id: {run_id}")
+    total_elapsed = time.perf_counter() - RUN_START
+    print(f"\n{'='*60}", flush=True)
+    print(f"  TRAINING COMPLETE — run_id: {run_id}", flush=True)
+    print(f"  Total time: {total_elapsed:.1f}s  ({total_elapsed/60:.1f} min)", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
 
 if __name__ == "__main__":

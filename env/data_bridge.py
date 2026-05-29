@@ -12,10 +12,12 @@ so indicators have enough history before training starts.
 
 from __future__ import annotations
 
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 from env.indicators import build_feature_df
 
@@ -48,17 +50,32 @@ def build_feature_data(
         _news_fn = None
 
     feature_dict: Dict[str, Dict[int, pd.DataFrame]] = {}
-    for sym in symbols:
-        feature_dict[sym] = {}
-        for tf, df in data_dict[sym].items():
-            print(f"  Building features {sym} {tf}m ({len(df):,} rows) ...", flush=True)
-            enriched = build_feature_df(df)
-            # Add news feature to 1m frame only (higher TFs inherit via lookup)
-            if tf == 1 and _news_fn is not None:
-                enriched["high_impact_news_soon"] = enriched.index.map(
-                    lambda t: _news_fn(t, minutes_forward=60)
-                ).astype(float)
-            feature_dict[sym][tf] = enriched
+    total_start = time.perf_counter()
+    all_tasks = [(sym, tf, df)
+                 for sym in symbols
+                 for tf, df in data_dict[sym].items()]
+
+    with tqdm(total=len(all_tasks), desc="Building features", unit="frame") as pbar:
+        for sym in symbols:
+            feature_dict[sym] = {}
+            for tf, df in data_dict[sym].items():
+                label = f"{sym} {tf}m ({len(df):,} rows)"
+                pbar.set_postfix_str(label)
+                t0 = time.perf_counter()
+                print(f"[START] Features {label}", flush=True)
+                enriched = build_feature_df(df)
+                # Add news feature to 1m frame only (higher TFs inherit via lookup)
+                if tf == 1 and _news_fn is not None:
+                    enriched["high_impact_news_soon"] = enriched.index.map(
+                        lambda t: _news_fn(t, minutes_forward=60)
+                    ).astype(float)
+                feature_dict[sym][tf] = enriched
+                elapsed = time.perf_counter() - t0
+                print(f"[DONE]  Features {label}  {elapsed:.1f}s", flush=True)
+                pbar.update(1)
+
+    print(f"[DONE]  build_feature_data — all frames in "
+          f"{time.perf_counter()-total_start:.1f}s", flush=True)
     return feature_dict
 
 

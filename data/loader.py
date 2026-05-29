@@ -10,11 +10,13 @@ CSV format expected (MT5 History Center export, tab-separated):
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 import pytz
+from tqdm.auto import tqdm
 
 # ── constants ─────────────────────────────────────────────────────────────────
 CET = pytz.timezone("Europe/Berlin")
@@ -77,6 +79,7 @@ def load_m1(
     """
     # Read in chunks so large CSVs (2M+ rows) don't exhaust RAM.
     # MT5 date column is "YYYY.MM.DD" — compare as string against ISO dates.
+    t0 = time.perf_counter()
     chunks = []
     reader = pd.read_csv(
         csv_path,
@@ -86,7 +89,11 @@ def load_m1(
         chunksize=100_000,
     )
     done = False
+    file_size_mb = csv_path.stat().st_size / 1_048_576
+    pbar = tqdm(desc=f"  Reading {symbol} ({file_size_mb:.0f} MB)",
+                unit="chunk", leave=False)
     for chunk in reader:
+        pbar.update(1)
         if done:
             break
         # Normalise column names once (same for every chunk)
@@ -103,6 +110,7 @@ def load_m1(
             chunk = chunk[~past_end].reset_index(drop=True)
         if not chunk.empty:
             chunks.append(chunk)
+    pbar.close()
 
     if not chunks:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
@@ -174,21 +182,27 @@ def load_all(
         timeframes = [1, 15, 60, 1440]
 
     data: Dict[str, Dict[int, pd.DataFrame]] = {}
+    total_start = time.perf_counter()
 
-    for sym in symbols:
+    for sym in tqdm(symbols, desc="Loading symbols", unit="sym"):
         csv_path = _find_csv(sym, csv_map, data_dir)
-        print(f"  Loading {sym} from {csv_path.name} ...", end="", flush=True)
+        t0 = time.perf_counter()
+        print(f"\n[START] Loading {sym}  ({csv_path.name})", flush=True)
 
         df_1m = load_m1(sym, csv_path, date_from=date_from, date_to=date_to)
-        print(f" {len(df_1m):,} rows", flush=True)
+        print(f"[DONE]  Loading {sym} 1m — {len(df_1m):,} rows  "
+              f"({time.perf_counter()-t0:.1f}s)", flush=True)
 
         data[sym] = {1: df_1m}
-        for tf in timeframes:
-            if tf == 1:
-                continue
+        resample_tfs = [tf for tf in timeframes if tf != 1]
+        for tf in tqdm(resample_tfs, desc=f"  Resampling {sym}", unit="tf", leave=False):
+            tr = time.perf_counter()
             data[sym][tf] = resample_m1(df_1m, tf)
-            print(f"    -> {tf}m: {len(data[sym][tf]):,} rows")
+            print(f"         {sym} {tf}m: {len(data[sym][tf]):,} rows  "
+                  f"({time.perf_counter()-tr:.2f}s)", flush=True)
 
+    print(f"\n[DONE]  load_all — {len(symbols)} symbols in "
+          f"{time.perf_counter()-total_start:.1f}s", flush=True)
     return data
 
 

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 import yaml
+from tqdm.auto import tqdm
 
 from agents.dqn_agent import DQNAgent
 from env.ftmo_game import FTMOGame, NUM_ACTIONS
@@ -87,19 +88,23 @@ def run_phase(
     episode          = 0
     pnls             = []
     trade_logs       = pd.DataFrame()
+    phase_start      = time.perf_counter()
 
-    print(f"\n{'='*60}")
-    print(f"  Phase {phase_id}: {phase_cfg['name']}")
-    print(f"{'='*60}")
+    print(f"\n{'='*60}", flush=True)
+    print(f"  [START] Phase {phase_id}: {phase_cfg['name']}", flush=True)
+    print(f"{'='*60}", flush=True)
+
+    ep_bar = tqdm(desc=f"Phase {phase_id} episodes", unit="ep", dynamic_ncols=True)
 
     while True:
         if env.curr_idx >= env.max_idx:
-            print(f"[Phase {phase_id}] Data exhausted.")
+            print(f"\n[Phase {phase_id}] Data exhausted after {episode} episodes.", flush=True)
             break
 
         episode += 1
+        ep_start  = time.perf_counter()
         env.reset()
-        env.curr_idx = env.curr_idx  # continue from where we left off
+        env.curr_idx = env.curr_idx
         state_tp1 = env.get_state()
         eps       = DQNAgent.epsilon(episode, rl_cfg["EPSILON"], rl_cfg["EPS_MIN"])
         game_over = False
@@ -126,6 +131,7 @@ def run_phase(
             if game_over and rl_cfg["UPDATE_QR"]:
                 agent.sync_r_net()
 
+        ep_elapsed = time.perf_counter() - ep_start
         pnls.append(env.equity - env.initial_equity)
         last_result = env.ftmo_day.classify() if env._day_results else "ok"
         if last_result == "pass":
@@ -133,9 +139,18 @@ def run_phase(
         else:
             consecutive_pass = 0
 
-        print(f"  Ep {episode:04d} | phase {phase_id} | "
+        ep_bar.update(1)
+        ep_bar.set_postfix(
+            equity=f"{env.equity:,.0f}",
+            streak=env.days_in_streak,
+            consec=consecutive_pass,
+            eps=f"{eps:.3f}",
+            secs=f"{ep_elapsed:.1f}s",
+        )
+        print(f"  Ep {episode:04d} | ph{phase_id} | "
               f"equity {env.equity:,.0f} | streak {env.days_in_streak} | "
-              f"consec_pass {consecutive_pass} | eps {eps:.4f}")
+              f"consec_pass {consecutive_pass} | eps {eps:.4f} | "
+              f"{ep_elapsed:.1f}s", flush=True)
 
         if logger:
             logger.log({
@@ -153,11 +168,16 @@ def run_phase(
             tl = pd.DataFrame(env.trade_log)
             tl.to_pickle(paths["trades"])
 
-        # Advance phase when 10 consecutive pass-days
+        # Advance phase when consecutive pass-days target reached
         if consecutive_pass >= advance_days:
-            print(f"[Phase {phase_id}] Achieved {advance_days} consecutive pass-days -> advancing!")
+            print(f"\n[Phase {phase_id}] Achieved {advance_days} consecutive pass-days -> advancing!",
+                  flush=True)
             break
 
+    ep_bar.close()
+    phase_elapsed = time.perf_counter() - phase_start
+    print(f"[DONE]  Phase {phase_id} — {episode} episodes in "
+          f"{phase_elapsed:.1f}s ({phase_elapsed/60:.1f} min)", flush=True)
     agent.save(paths["weights"], paths["replay"], paths["risk"])
     return agent
 
@@ -249,23 +269,64 @@ def forward_test(
     )
 
     env.reset()
-    results = []
-    while env.curr_idx < env.max_idx:
-        state   = env.get_state()
-        actions = agent.select_actions(state, epsilon=0.0)   # greedy
-        env.act(actions)
-        env.step()
-        results.append({
-            "time":    env._curr_time(),
-            "equity":  env.equity,
-            "streak":  env.days_in_streak,
-        })
+    total_steps = env.max_idx - env.curr_idx
+    results     = []
+    fwd_start   = time.perf_counter()
+    print(f"[START] forward_test — {total_steps:,} steps", flush=True)
 
+    with tqdm(total=total_steps, desc="Forward test", unit="bar",
+              dynamic_ncols=True) as pbar:
+        while env.curr_idx < env.max_idx:
+            state   = env.get_state()
+            actions = agent.select_actions(state, epsilon=0.0)   # greedy
+            env.act(actions)
+            env.step()
+            results.append({
+                "time":   env._curr_time(),
+                "equity": env.equity,
+                "streak": env.days_in_streak,
+            })
+            pbar.update(1)
+            if len(results) % 10_000 == 0:
+                pbar.set_postfix(equity=f"{env.equity:,.0f}",
+                                 streak=env.days_in_streak)
+
+    elapsed = time.perf_counter() - fwd_start
     df = pd.DataFrame(results)
+
+    # Compute daily metrics for the forward test output
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["time"]).dt.date
+        daily = (
+            df.groupby("date")
+            .agg(start_equity=("equity", "first"),
+                 end_equity=("equity", "last"),
+                 peak_equity=("equity", "max"))
+            .reset_index()
+        )
+        daily["daily_return_pct"] = (
+            (daily["end_equity"] - daily["start_equity"]) / daily["start_equity"] * 100
+        )
+        daily["daily_max_dd_pct"] = (
+            (daily["peak_equity"] - daily["end_equity"]) / daily["peak_equity"] * 100
+        )
+        daily["result"] = daily.apply(
+            lambda r: ("pass" if r["daily_return_pct"] / 100 >= cfg["FTMO"]["daily_profit_target_pct"]
+                       and r["daily_max_dd_pct"] / 100 <= cfg["FTMO"]["daily_max_drawdown_pct"]
+                       else ("ok" if r["daily_return_pct"] >= 0 else "fail")),
+            axis=1,
+        )
+        out_path = Path(cfg["PATHS"]["trade_logs_dir"]) / run_id / "forward_test.csv"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        daily.to_csv(out_path, index=False)
+        print(f"[DONE]  forward_test — {len(daily)} days  {elapsed:.1f}s  "
+              f"saved to {out_path}", flush=True)
+        return daily
+
     out_path = Path(cfg["PATHS"]["trade_logs_dir"]) / run_id / "forward_test.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
-    print(f"[forward_test] Saved to {out_path}")
+    print(f"[DONE]  forward_test — {elapsed:.1f}s  saved to {out_path}", flush=True)
     return df
 
 
