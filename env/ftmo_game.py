@@ -202,6 +202,10 @@ class FTMOGame:
         self._rolling_returns: List[float] = []
         self._ath_sharpe: float = 0.0
 
+        # Cache for _lookup_row: {(symbol, tf): last_iloc_index}
+        # Avoids repeated O(log N) binary searches during sequential playback.
+        self._lookup_cache: Dict[Tuple[str, int], int] = {}
+
         self.reset()
 
     # ── index helpers ─────────────────────────────────────────────────────────
@@ -210,12 +214,23 @@ class FTMOGame:
 
     def _lookup_row(self, symbol: str, tf: int) -> Optional[pd.Series]:
         """Get the most recent row of (symbol, tf) at or before curr_time."""
-        df = self.data_dict[symbol][tf]
-        t  = self._curr_time()
-        idx = df.index.searchsorted(t, side="right") - 1
-        if idx < 0:
+        df  = self.data_dict[symbol][tf]
+        t   = self._curr_time()
+        # Use cached position when available to avoid repeated binary searches
+        key = (symbol, tf)
+        cached_idx = self._lookup_cache.get(key, 0)
+        idx_arr = df.index
+        n = len(idx_arr)
+        # Walk forward from cache — O(1) amortised during sequential playback
+        while cached_idx + 1 < n and idx_arr[cached_idx + 1] <= t:
+            cached_idx += 1
+        # Clamp: if cache is ahead of t, fall back to binary search
+        if cached_idx >= n or idx_arr[cached_idx] > t:
+            cached_idx = df.index.searchsorted(t, side="right") - 1
+        self._lookup_cache[key] = cached_idx
+        if cached_idx < 0:
             return None
-        return df.iloc[idx]
+        return df.iloc[cached_idx]
 
     # ── position sizing ───────────────────────────────────────────────────────
     def _lots_for_action(self, action: int) -> float:
@@ -301,11 +316,10 @@ class FTMOGame:
                 if row is None:
                     parts.append(np.zeros(50))
                     continue
-                # take a window of up to lkbk rows ending at curr_time
-                df  = self.data_dict[sym][tf]
-                t   = self._curr_time()
-                end_idx   = df.index.searchsorted(t, side="right")
+                # Reuse the cache entry set by _lookup_row (avoids second searchsorted)
+                end_idx   = self._lookup_cache.get((sym, tf), 0) + 1
                 start_idx = max(0, end_idx - self.lkbk)
+                df        = self.data_dict[sym][tf]
                 window    = df.iloc[start_idx:end_idx]
                 arr       = window.select_dtypes(include=[np.number]).values
                 arr       = arr[-min(10, len(arr)):]   # last 10 rows
@@ -508,5 +522,6 @@ class FTMOGame:
         self.is_over        = False
         self.reward         = 0.0
         self.trade_log      = []
+        self._lookup_cache  = {}   # invalidate cache on reset
         # advance to init_idx
         self._check_day_boundary()

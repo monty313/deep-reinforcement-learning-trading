@@ -185,23 +185,20 @@ def can_open_trade_phase1(row_1m: pd.Series, row_15m: pd.Series) -> bool:
     Phase 1 – CCI alignment on 1m and 15m.
     New trade allowed only when CCI30 and CCI100 are both above their
     SMA(1,+2) on both TFs, or both below on both TFs.
+    Falls back to True (allow trade) when indicator columns are absent or NaN,
+    so warm-up rows don't deadlock Phase 1 training.
     """
-    dir_1m = (
-        _aligned(row_1m.get("cci30"), row_1m.get("cci30_sma1_sh2")) ==
-        _aligned(row_1m.get("cci100"), row_1m.get("cci100_sma1_sh2"))
-        and _aligned(row_1m.get("cci30"), row_1m.get("cci30_sma1_sh2")) != 0
-    )
-    dir_15m = (
-        _aligned(row_15m.get("cci30"), row_15m.get("cci30_sma1_sh2")) ==
-        _aligned(row_15m.get("cci100"), row_15m.get("cci100_sma1_sh2"))
-        and _aligned(row_15m.get("cci30"), row_15m.get("cci30_sma1_sh2")) != 0
-    )
-    if not (dir_1m and dir_15m):
-        return False
-    # same direction on both TFs
-    d1 = _aligned(row_1m.get("cci30"), row_1m.get("cci30_sma1_sh2"))
-    d15 = _aligned(row_15m.get("cci30"), row_15m.get("cci30_sma1_sh2"))
-    return d1 == d15
+    d1_30  = _aligned(row_1m.get("cci30"),  row_1m.get("cci30_sma1_sh2"))
+    d1_100 = _aligned(row_1m.get("cci100"), row_1m.get("cci100_sma1_sh2"))
+    d15_30 = _aligned(row_15m.get("cci30"),  row_15m.get("cci30_sma1_sh2"))
+    d15_100 = _aligned(row_15m.get("cci100"), row_15m.get("cci100_sma1_sh2"))
+
+    # If any signal is unavailable (NaN -> _aligned returns 0), allow trading
+    if d1_30 == 0 or d1_100 == 0 or d15_30 == 0 or d15_100 == 0:
+        return True
+
+    # Both CCIs must agree on direction within each TF, and TFs must agree
+    return d1_30 == d1_100 == d15_30 == d15_100
 
 
 def must_be_in_trade_phase2(row_1m: pd.Series, row_1h: pd.Series) -> bool:

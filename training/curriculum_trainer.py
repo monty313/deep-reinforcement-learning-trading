@@ -103,8 +103,12 @@ def run_phase(
 
         episode += 1
         ep_start  = time.perf_counter()
+        # Save position before reset so each episode picks up where the last ended.
+        # reset() rewinds to init_idx; we advance past it to continue sequentially.
+        saved_idx = env.curr_idx
         env.reset()
-        env.curr_idx = env.curr_idx
+        if saved_idx > env.init_idx:
+            env.curr_idx = saved_idx
         state_tp1 = env.get_state()
         eps       = DQNAgent.epsilon(episode, rl_cfg["EPSILON"], rl_cfg["EPS_MIN"])
         game_over = False
