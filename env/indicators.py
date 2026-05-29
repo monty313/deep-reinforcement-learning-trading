@@ -39,17 +39,22 @@ def _bb_bands(series: pd.Series, period: int, nbdev: float = 2.0):
     )
 
 
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def compute_indicators(df: pd.DataFrame, compute_heavy: bool = False) -> pd.DataFrame:
     """
     Given a DataFrame with columns [open, high, low, close, volume],
     return a new DataFrame with all indicator columns appended.
     No rows are dropped — NaN values in early rows are kept.
+    compute_heavy: if False, skips cci900 (slow on 1m data, ~40% of build time).
     """
     close  = df["close"]
     high   = df["high"]
     low    = df["low"]
     open_  = df["open"]
     out    = pd.DataFrame(index=df.index)
+    # Cache float arrays once to avoid repeated .values.astype(float) calls
+    c = close.values.astype(np.float32)
+    h = high.values.astype(np.float32)
+    l = low.values.astype(np.float32)
 
     # ── 3.1 Price & volatility ────────────────────────────────────────────────
     out["open"]   = open_
@@ -58,10 +63,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["close"]  = close
     out["volume"] = df["volume"]
 
-    atr14 = pd.Series(talib.ATR(high.values.astype(float),
-                                low.values.astype(float),
-                                close.values.astype(float), timeperiod=14),
-                      index=df.index)
+    atr14 = pd.Series(talib.ATR(h, l, c, timeperiod=14), index=df.index)
     out["atr14"]            = atr14
     out["atr14_sma1_sh2"]   = _sma(atr14, 1, shift=2)
 
@@ -75,19 +77,23 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["bb20_upper"]  = bb20_u
     out["bb20_mid"]    = bb20_m
     out["bb20_lower"]  = bb20_l
-    out["rsi7"]        = pd.Series(talib.RSI(close.values.astype(float), timeperiod=7), index=df.index)
+    out["rsi7"]        = pd.Series(talib.RSI(c, timeperiod=7), index=df.index)
 
     # ── STRAT-002 (CCI Surge Sentinel) ────────────────────────────────────────
-    out["cci30"]  = pd.Series(talib.CCI(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=30),  index=df.index)
-    out["cci100"] = pd.Series(talib.CCI(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=100), index=df.index)
+    out["cci30"]  = pd.Series(talib.CCI(h, l, c, timeperiod=30),  index=df.index)
+    out["cci100"] = pd.Series(talib.CCI(h, l, c, timeperiod=100), index=df.index)
     # rsi7 already added
 
     # ── STRAT-003 (CCI Trinity Vanguard) ──────────────────────────────────────
-    out["cci14"]  = pd.Series(talib.CCI(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=14),  index=df.index)
-    out["cci900"] = pd.Series(talib.CCI(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=900), index=df.index)
+    out["cci14"]  = pd.Series(talib.CCI(h, l, c, timeperiod=14),  index=df.index)
+    if compute_heavy:
+        out["cci900"] = pd.Series(talib.CCI(h, l, c, timeperiod=900), index=df.index)
+        out["cci900_sma20"] = _sma(out["cci900"], 20)
+    else:
+        out["cci900"] = np.nan
+        out["cci900_sma20"] = np.nan
     out["cci14_sma20"]  = _sma(out["cci14"],  20)
     out["cci100_sma20"] = _sma(out["cci100"], 20)
-    out["cci900_sma20"] = _sma(out["cci900"], 20)
 
     # ── STRAT-004 (SMA Stack Prophet) ─────────────────────────────────────────
     out["sma50"]        = _sma(close, 50)
@@ -100,7 +106,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # sma50 already added
 
     # ── STRAT-006 (Dual Momentum-Volatility Filter) ───────────────────────────
-    adx14 = pd.Series(talib.ADX(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=14), index=df.index)
+    adx14 = pd.Series(talib.ADX(h, l, c, timeperiod=14), index=df.index)
     out["adx14"]          = adx14
     out["adx14_sma1_sh5"] = _sma(adx14, 1, shift=5)
     out["atr14_sma1_sh5"] = _sma(atr14, 1, shift=5)
@@ -113,7 +119,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # sma4_sh4 already added
 
     # ── STRAT-008 (CCI BB Outbreak Hunter) ────────────────────────────────────
-    out["cci300"] = pd.Series(talib.CCI(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=300), index=df.index)
+    out["cci300"] = pd.Series(talib.CCI(h, l, c, timeperiod=300), index=df.index)
     for cci_col in ["cci30", "cci100", "cci300"]:
         bb_u, bb_m, bb_l = _bb_bands(out[cci_col], period=14, nbdev=1.0)
         out[f"{cci_col}_bb14_upper"] = bb_u
@@ -127,7 +133,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # sma200 already added
 
     # ── STRAT-011 (Shifted CCI Momentum Aligner) ──────────────────────────────
-    out["cci140"] = pd.Series(talib.CCI(high.values.astype(float), low.values.astype(float), close.values.astype(float), timeperiod=140), index=df.index)
+    out["cci140"] = pd.Series(talib.CCI(h, l, c, timeperiod=140), index=df.index)
     out["cci140_sma1_sh4"] = _sma(out["cci140"], 1, shift=4)
     # cci14 already added
 
@@ -160,9 +166,9 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_feature_df(df: pd.DataFrame) -> pd.DataFrame:
+def build_feature_df(df: pd.DataFrame, compute_heavy: bool = False) -> pd.DataFrame:
     """Full pipeline: indicators + time features for one TF DataFrame."""
-    ind = compute_indicators(df)
+    ind = compute_indicators(df, compute_heavy=compute_heavy)
     return add_time_features(ind)
 
 

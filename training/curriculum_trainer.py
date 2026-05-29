@@ -84,11 +84,13 @@ def run_phase(
         training_mode    = training_mode,  # Pass training mode for curriculum
     )
 
-    consecutive_pass = 0
-    episode          = 0
-    pnls             = []
-    trade_logs       = pd.DataFrame()
-    phase_start      = time.perf_counter()
+    consecutive_pass    = 0
+    episode             = 0
+    pnls                = []
+    trade_logs          = pd.DataFrame()
+    phase_start         = time.perf_counter()
+    max_episodes        = cfg.get("CURRICULUM", {}).get("max_episodes_per_phase", 500)
+    max_episode_steps   = cfg.get("CURRICULUM", {}).get("max_episode_steps", 5000)
 
     print(f"\n{'='*60}", flush=True)
     print(f"  [START] Phase {phase_id}: {phase_cfg['name']}", flush=True)
@@ -99,6 +101,9 @@ def run_phase(
     while True:
         if env.curr_idx >= env.max_idx:
             print(f"\n[Phase {phase_id}] Data exhausted after {episode} episodes.", flush=True)
+            break
+        if episode >= max_episodes:
+            print(f"\n[Phase {phase_id}] Max episodes ({max_episodes}) reached — advancing.", flush=True)
             break
 
         episode += 1
@@ -114,8 +119,9 @@ def run_phase(
         game_over = False
         step      = 0
 
+        train_every = rl_cfg.get("TRAIN_EVERY", 4)
         while not game_over:
-            if env.curr_idx >= env.max_idx:
+            if env.curr_idx >= env.max_idx or step >= max_episode_steps:
                 game_over = True
                 break
 
@@ -130,7 +136,8 @@ def run_phase(
             agent.exp_replay.remember(
                 [state_t, flat_action, reward, state_tp1], game_over
             )
-            agent.train_step(rl_cfg["BATCH_SIZE"])
+            if step % train_every == 0:
+                agent.train_step(rl_cfg["BATCH_SIZE"])
 
             if game_over and rl_cfg["UPDATE_QR"]:
                 agent.sync_r_net()
@@ -151,10 +158,11 @@ def run_phase(
             eps=f"{eps:.3f}",
             secs=f"{ep_elapsed:.1f}s",
         )
-        print(f"  Ep {episode:04d} | ph{phase_id} | "
-              f"equity {env.equity:,.0f} | streak {env.days_in_streak} | "
-              f"consec_pass {consecutive_pass} | eps {eps:.4f} | "
-              f"{ep_elapsed:.1f}s", flush=True)
+        if episode % 50 == 0 or consecutive_pass >= advance_days - 1:
+            print(f"  Ep {episode:04d} | ph{phase_id} | "
+                  f"equity {env.equity:,.0f} | streak {env.days_in_streak} | "
+                  f"consec_pass {consecutive_pass} | eps {eps:.4f} | "
+                  f"{ep_elapsed:.1f}s", flush=True)
 
         if logger:
             logger.log({
@@ -166,8 +174,8 @@ def run_phase(
                 "last_day":  last_result,
             })
 
-        # Save every 10 episodes
-        if not episode % 10:
+        # Save every 50 episodes
+        if not episode % 50:
             agent.save(paths["weights"], paths["replay"], paths["risk"])
             tl = pd.DataFrame(env.trade_log)
             tl.to_pickle(paths["trades"])

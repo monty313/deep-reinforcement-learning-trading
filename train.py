@@ -120,7 +120,9 @@ def main():
                 date_to   = to_dt,
             )
             # build features for this symbol, then discard raw data immediately
-            feature_dict[sym] = build_feature_data({sym: raw_sym}, [sym])[sym]
+            compute_heavy = cfg.get("RL", {}).get("compute_heavy_indicators", False)
+            feature_dict[sym] = build_feature_data(
+                {sym: raw_sym}, [sym], compute_heavy=compute_heavy)[sym]
             del raw_sym
         return feature_dict
 

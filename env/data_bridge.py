@@ -12,7 +12,10 @@ so indicators have enough history before training starts.
 
 from __future__ import annotations
 
+import hashlib
+import pickle
 import time
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -27,9 +30,10 @@ MIN_WARMUP_BARS_1M = 1200   # ~20 hours of 1m data
 
 
 def build_feature_data(
-    data_dict:    Dict[str, Dict[int, pd.DataFrame]],
-    symbols:      List[str] = None,
-    add_news:     bool      = True,
+    data_dict:      Dict[str, Dict[int, pd.DataFrame]],
+    symbols:        List[str] = None,
+    add_news:       bool      = True,
+    compute_heavy:  bool      = False,
 ) -> Dict[str, Dict[int, pd.DataFrame]]:
     """
     Apply build_feature_df (all indicators) to every symbol x timeframe.
@@ -55,23 +59,38 @@ def build_feature_data(
                  for sym in symbols
                  for tf, df in data_dict[sym].items()]
 
+    cache_dir = Path("data_cache")
+    cache_dir.mkdir(exist_ok=True)
+
     with tqdm(total=len(all_tasks), desc="Building features", unit="frame") as pbar:
         for sym in symbols:
             feature_dict[sym] = {}
             for tf, df in data_dict[sym].items():
                 label = f"{sym} {tf}m ({len(df):,} rows)"
                 pbar.set_postfix_str(label)
-                t0 = time.perf_counter()
-                print(f"[START] Features {label}", flush=True)
-                enriched = build_feature_df(df)
-                # Add news feature to 1m frame only (higher TFs inherit via lookup)
-                if tf == 1 and _news_fn is not None:
-                    enriched["high_impact_news_soon"] = enriched.index.map(
-                        lambda t: _news_fn(t, minutes_forward=60)
-                    ).astype(float)
+
+                # Build a cache key from symbol, tf, date range, and row count
+                cache_key = hashlib.md5(
+                    f"{sym}_{tf}_{len(df)}_{df.index[0]}_{df.index[-1]}".encode()
+                ).hexdigest()[:12]
+                cache_file = cache_dir / f"{cache_key}.pkl"
+
+                if cache_file.exists():
+                    enriched = pickle.load(open(cache_file, "rb"))
+                    print(f"[CACHE] Features {label}", flush=True)
+                else:
+                    t0 = time.perf_counter()
+                    print(f"[START] Features {label}", flush=True)
+                    enriched = build_feature_df(df, compute_heavy=compute_heavy)
+                    # Add news feature to 1m frame only
+                    if tf == 1 and _news_fn is not None:
+                        enriched["high_impact_news_soon"] = enriched.index.map(
+                            lambda t: _news_fn(t, minutes_forward=60)
+                        ).astype(float)
+                    pickle.dump(enriched, open(cache_file, "wb"))
+                    print(f"[DONE]  Features {label}  {time.perf_counter()-t0:.1f}s", flush=True)
+
                 feature_dict[sym][tf] = enriched
-                elapsed = time.perf_counter() - t0
-                print(f"[DONE]  Features {label}  {elapsed:.1f}s", flush=True)
                 pbar.update(1)
 
     print(f"[DONE]  build_feature_data — all frames in "

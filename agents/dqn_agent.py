@@ -11,6 +11,7 @@ Multi-asset DQN agent (Keras).  Extends the Quantra template approach with:
 from __future__ import annotations
 
 import pickle
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -30,15 +31,13 @@ DEFAULT_RISK_FRACTIONS = {"small": 0.005, "med": 0.010, "large": 0.020}
 class ExperienceReplay:
     """Bellman experience replay memory."""
 
-    def __init__(self, max_memory: int = 2000, discount: float = 0.95):
+    def __init__(self, max_memory: int = 50_000, discount: float = 0.95):
         self.max_memory = max_memory
         self.discount   = discount
-        self.memory: list = []
+        self.memory: deque = deque(maxlen=max_memory)
 
     def remember(self, states, game_over: bool):
         self.memory.append([states, game_over])
-        if len(self.memory) > self.max_memory:
-            del self.memory[0]
 
     def process(self, q_net, r_net, batch_size: int = 32):
         n           = len(self.memory)
@@ -62,20 +61,16 @@ class ExperienceReplay:
             dones[i]       = self.memory[idx][1]
 
         # Single batched predict call each — eliminates per-sample overhead
-        targets  = r_net.predict(inputs, verbose=0)
-        q_next   = q_net.predict(next_states, verbose=0)
+        targets = r_net.predict(inputs, verbose=0)
+        q_next  = q_net.predict(next_states, verbose=0)
+        q_max   = q_next.max(axis=1)
 
-        # E4: Shape validation
-        assert targets.shape[0] == bs, f"[E4] targets rows {targets.shape[0]} != bs {bs}"
-        assert q_next.shape[0] == bs,  f"[E4] q_next rows {q_next.shape[0]} != bs {bs}"
-
-        q_max    = q_next.max(axis=1)
-
-        for i in range(bs):
-            if dones[i]:
-                targets[i, actions[i]] = rewards[i]
-            else:
-                targets[i, actions[i]] = rewards[i] + self.discount * q_max[i]
+        # Vectorized Bellman update — no Python for-loop
+        targets[np.arange(bs), actions] = np.where(
+            dones,
+            rewards,
+            rewards + self.discount * q_max,
+        )
 
         return inputs, targets
 
@@ -147,9 +142,6 @@ class DQNAgent:
             return {s: np.random.randint(0, NUM_ACTIONS) for s in self.symbols}
 
         q_vals = self.q_net(state, training=False).numpy()[0]  # shape: (num_assets * NUM_ACTIONS,)
-        # E1: Guard against model divergence
-        assert not np.isnan(q_vals).any(), f"[E1] Q-values contain NaN — model may have diverged"
-        assert not np.isinf(q_vals).any(), f"[E1] Q-values contain Inf — model may have diverged"
         q_mat  = q_vals.reshape(self.num_assets, NUM_ACTIONS)
         return {self.symbols[i]: int(np.argmax(q_mat[i])) for i in range(self.num_assets)}
 

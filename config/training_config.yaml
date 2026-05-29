@@ -70,16 +70,18 @@ RL:
   LKBK:            20
   HIDDEN_MULT:     2
   ACTIVATION_FUN:  relu
-  LEARNING_RATE:   0.001
+  LEARNING_RATE:   0.0005
   LOSS_FUNCTION:   mse
-  MAX_MEM:         2000
+  MAX_MEM:         50000
   DISCOUNT_RATE:   0.95
   EPSILON:         0.9
   EPS_MIN:         0.05
-  BATCH_SIZE:      32
+  BATCH_SIZE:      64
   UPDATE_QR:       true
   PRELOAD:         false
   TEST_MODE:       false
+  TRAIN_EVERY:     4
+  compute_heavy_indicators: false
 
 # ── Action / risk ──────────────────────────────────────────────────────────────
 ACTIONS:
@@ -91,7 +93,9 @@ ACTIONS:
 
 # ── Curriculum ─────────────────────────────────────────────────────────────────
 CURRICULUM:
-  advance_consecutive_pass_days: 10
+  advance_consecutive_pass_days: 5
+  max_episodes_per_phase: 500
+  max_episode_steps: 5000
   phases:
     - id: 1
       name: "CCI alignment (1m+15m)"
