@@ -148,17 +148,16 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Append CET/CEST cyclical time features.
+    Append CET/CEST cyclical time features in-place (no full copy).
     Assumes df.index is already in CET/CEST (Europe/Berlin).
     """
-    out = df.copy()
     hour = df.index.hour + df.index.minute / 60.0
     dow  = df.index.dayofweek  # 0=Monday
-    out["sin_hour"] = np.sin(2 * np.pi * hour / 24)
-    out["cos_hour"] = np.cos(2 * np.pi * hour / 24)
-    out["sin_dow"]  = np.sin(2 * np.pi * dow / 7)
-    out["cos_dow"]  = np.cos(2 * np.pi * dow / 7)
-    return out
+    df["sin_hour"] = np.sin(2 * np.pi * hour / 24)
+    df["cos_hour"] = np.cos(2 * np.pi * hour / 24)
+    df["sin_dow"]  = np.sin(2 * np.pi * dow / 7)
+    df["cos_dow"]  = np.cos(2 * np.pi * dow / 7)
+    return df
 
 
 def build_feature_df(df: pd.DataFrame) -> pd.DataFrame:
