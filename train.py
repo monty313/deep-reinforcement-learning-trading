@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from data.loader import load_all, split_data
-from env.data_bridge import build_feature_data, compute_init_idx, slice_feature_data
+from env.data_bridge import build_feature_data, compute_init_idx
 from agents.dqn_agent import DQNAgent
 from env.ftmo_game import FTMOGame
 from training.curriculum_trainer import run_phase, forward_test, _paths
@@ -102,28 +102,34 @@ def main():
     print(f"  Fwd     : {dates['fwd_start']}   -> present", flush=True)
     print(f"{'='*60}\n", flush=True)
 
-    # ── 1. Load raw CSVs ──────────────────────────────────────────────────────
-    t0 = _stage("Stage 1/8 — Load raw CSVs")
-    raw_data = load_all(
-        symbols    = symbols,
-        csv_map    = cfg.get("csv_map"),
-        data_dir   = cfg.get("data_dir"),
-        date_from  = dates["train_start"],
-        date_to    = dates.get("fwd_end"),
-    )
-    _done("Stage 1/8 — Load raw CSVs", t0)
+    # ── 1. Load raw CSVs (one window at a time to avoid OOM on 2M-row files) ───
+    # Build features per window so indicators are never computed on the full
+    # 2M-row dataset.  Each window gets its own load+feature pass.
+    t0 = _stage("Stage 1/8 — Load raw CSVs + build features (per window)")
 
-    # ── 2. Build indicator features ───────────────────────────────────────────
-    t0 = _stage("Stage 2/8 — Build indicator features")
-    feature_data = build_feature_data(raw_data, symbols)
-    _done("Stage 2/8 — Build indicator features", t0)
+    def _load_and_build(label: str, from_dt: str, to_dt: str):
+        print(f"  [{label}] loading {from_dt} -> {to_dt}", flush=True)
+        raw = load_all(
+            symbols    = symbols,
+            csv_map    = cfg.get("csv_map"),
+            data_dir   = cfg.get("data_dir"),
+            date_from  = from_dt,
+            date_to    = to_dt,
+        )
+        print(f"  [{label}] building features ...", flush=True)
+        return build_feature_data(raw, symbols)
 
-    # ── 3. Split into train / val / fwd ──────────────────────────────────────
-    t0 = _stage("Stage 3/8 — Slice train / val / fwd windows")
-    train_data = slice_feature_data(feature_data, dates["train_start"], dates["train_end"])
-    val_data   = slice_feature_data(feature_data, dates["val_start"],   dates["val_end"])
-    fwd_data   = slice_feature_data(feature_data, dates["fwd_start"],   dates.get("fwd_end"))
-    _done("Stage 3/8 — Slice windows", t0)
+    train_data = _load_and_build("train", dates["train_start"], dates["train_end"])
+    val_data   = _load_and_build("val",   dates["val_start"],   dates["val_end"])
+    fwd_data   = _load_and_build("fwd",   dates["fwd_start"],   dates.get("fwd_end"))
+
+    _done("Stage 1/8 — Load raw CSVs + build features", t0)
+
+    # ── 2. (merged into stage 1) ──────────────────────────────────────────────
+    # Feature building now happens per-window above; no full-dataset pass needed.
+
+    # ── 3. (merged into stage 1) ─────────────────────────────────────────────
+    # Windows are already sliced by date at load time; no further slicing needed.
 
     # ── 4. Compute warm-up offset ─────────────────────────────────────────────
     t0 = _stage("Stage 4/8 — Compute warm-up offset")
