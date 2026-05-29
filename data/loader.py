@@ -153,6 +153,37 @@ def resample_m1(df_1m: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
     )
 
 
+def load_one(
+    symbol:    str,
+    csv_map:   Dict[str, str]    = None,
+    data_dir:  Optional[str]     = None,
+    date_from: Optional[str]     = None,
+    date_to:   Optional[str]     = None,
+    timeframes: List[int]        = None,
+) -> Dict[int, pd.DataFrame]:
+    """Load a single symbol and return {tf_minutes: DataFrame}."""
+    if csv_map is None:
+        csv_map = DEFAULT_CSV_MAP
+    if timeframes is None:
+        timeframes = [1, 15, 60, 1440]
+
+    csv_path = _find_csv(symbol, csv_map, data_dir)
+    print(f"\n[START] Loading {symbol}  ({csv_path.name})", flush=True)
+    t0 = time.perf_counter()
+    df_1m = load_m1(symbol, csv_path, date_from=date_from, date_to=date_to)
+    print(f"[DONE]  Loading {symbol} 1m — {len(df_1m):,} rows  "
+          f"({time.perf_counter()-t0:.1f}s)", flush=True)
+
+    result = {1: df_1m}
+    resample_tfs = [tf for tf in timeframes if tf != 1]
+    for tf in resample_tfs:
+        tr = time.perf_counter()
+        result[tf] = resample_m1(df_1m, tf)
+        print(f"         {symbol} {tf}m: {len(result[tf]):,} rows  "
+              f"({time.perf_counter()-tr:.2f}s)", flush=True)
+    return result
+
+
 def load_all(
     symbols:   List[str]         = None,
     csv_map:   Dict[str, str]    = None,

@@ -28,7 +28,7 @@ from tqdm.auto import tqdm
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from data.loader import load_all, split_data
+from data.loader import load_all, load_one, split_data
 from env.data_bridge import build_feature_data, compute_init_idx
 from agents.dqn_agent import DQNAgent
 from env.ftmo_game import FTMOGame
@@ -108,16 +108,21 @@ def main():
     t0 = _stage("Stage 1/8 — Load raw CSVs + build features (per window)")
 
     def _load_and_build(label: str, from_dt: str, to_dt: str):
+        """Load + build features one symbol at a time to stay within RAM."""
         print(f"  [{label}] loading {from_dt} -> {to_dt}", flush=True)
-        raw = load_all(
-            symbols    = symbols,
-            csv_map    = cfg.get("csv_map"),
-            data_dir   = cfg.get("data_dir"),
-            date_from  = from_dt,
-            date_to    = to_dt,
-        )
-        print(f"  [{label}] building features ...", flush=True)
-        return build_feature_data(raw, symbols)
+        feature_dict = {}
+        for sym in tqdm(symbols, desc=f"  {label}", unit="sym"):
+            raw_sym = load_one(
+                symbol    = sym,
+                csv_map   = cfg.get("csv_map"),
+                data_dir  = cfg.get("data_dir"),
+                date_from = from_dt,
+                date_to   = to_dt,
+            )
+            # build features for this symbol, then discard raw data immediately
+            feature_dict[sym] = build_feature_data({sym: raw_sym}, [sym])[sym]
+            del raw_sym
+        return feature_dict
 
     train_data = _load_and_build("train", dates["train_start"], dates["train_end"])
     val_data   = _load_and_build("val",   dates["val_start"],   dates["val_end"])
