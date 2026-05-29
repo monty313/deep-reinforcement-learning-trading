@@ -1,0 +1,625 @@
+RL Trading Bot Evaluation Framework - Implementation Checklist
+Status: Planning
+Priority: CRITICAL (blocks production deployment)
+Target Completion: Phase 1 (Tier 1–2) in 2–3 weeks
+
+📋 Context
+Your RL trading bot has 60–70% of a production evaluation framework but lacks critical risk metrics, transaction cost modeling, and user-configurable targets. This plan ensures the bot can:
+
+Accurately predict live performance vs. backtest
+Meet FTMO challenge rules with transaction fees included
+Allow dynamic daily profit/risk targets
+Trade intelligently around news (not stop, but adapt)
+Calculate position sizing relative to daily goal
+Why now? Deploying without these will result in:
+
+Backtest-to-live performance discrepancy (slippage, fees)
+Inability to pass FTMO challenges (fees not modeled)
+Fixed strategy (can't adjust daily targets)
+Account blowups (no hard kill switches, no news awareness)
+🎯 Critical Additions from Your Requirements
+A. Transaction Fee Modeling (FTMO-specific)
+FX: $5 per lot (EURUSD, GBPUSD, XAUUSD, etc.)
+Metals: 0.001% of volume
+Indices: $0 (US30)
+Energy: $0
+Crypto: $0
+Stocks: 0.004% of volume
+Action Items:
+
+ Create env/ftmo_fees.py with fee calculator
+ Integrate fee subtraction into reward calculation
+ Backtest with fees included (recalculate all metrics)
+ Verify backtest PnL matches accounting for fees
+B. User-Configurable Daily Targets (KEY REQUIREMENT)
+ Add config inputs: daily_profit_target (e.g., +2.5%, +5%)
+ Add config inputs: daily_risk_limit (e.g., -1%, -2%)
+ Modify reward function to normalize targets relative to goal
+ Modify position sizing: scale based on remaining daily budget
+ Store targets in config/trading_config.yaml + allow override at runtime
+Example:
+
+DAILY_PROFIT_TARGET: 2.5 # % target for the day
+DAILY_RISK_LIMIT: -1.0 # % max loss for the day
+POSITION_SCALE_FACTOR: 0.33 # Size = (target * scale) / # symbols
+C. News Awareness (Not Trading Halt)
+ Integrate MQL5 economic calendar API
+ Feature engineer: "high-impact news in next 60min?" (boolean/probability)
+ Do NOT mask actions; instead add reward penalty for trading during high-impact news
+ Log: "Traded during ECB decision" → reward -= 0.5 if high-impact
+ Bot learns to either avoid or exploit; your choice via reward tuning
+D. Sharpe Ratio as Progressive Reward (Optional but Recommended)
+ Compute rolling Sharpe (last 20 days) during training
+ Add bonus to daily reward:
+sharpe_bonus = +0.1 if rolling_sharpe > 1.0 else 0
+ Track all-time high Sharpe; reward improvement:
+ath_bonus = +0.2 if current_sharpe > prev_ath else 0
+ ONLY apply bonuses on days that passed FTMO challenge (avoid conflicting objectives)
+✅ TIER 1: Before Any Live Trading (Weeks 1–2)
+1. Transaction Fee Integration
+ File: Create env/ftmo_fees.py
+
+Fee calculator function: calculate_fee(symbol, volume, entry_price, exit_price)
+Integrate into FTMODay class reward calculation
+Example: FX trade 1 lot = $5 fee, apply to realized PnL
+ Update env/ftmo_game.py
+
+Import fee calculator
+Subtract fees from daily PnL before reward
+Log fees per trade for transparency
+ Backtest with fees
+
+Re-run validation set with new fee model
+Compare old metrics vs. new metrics
+Document performance impact
+Success Criteria: Metrics CSV includes total_fees, net_pnl_after_fees
+
+2. Daily Target Configuration + Position Sizing
+ File: Update config/training_config.yaml
+
+Add: DAILY_PROFIT_TARGET: 2.5
+Add: DAILY_RISK_LIMIT: -1.0
+Add: POSITION_SCALE_FACTOR: 0.33
+ File: Update env/ftmo_game.py
+
+Read targets from config
+Modify position sizing logic:
+available_equity = equity * (DAILY_PROFIT_TARGET / 100)
+per_symbol_budget = available_equity * POSITION_SCALE_FACTOR
+action_size = per_symbol_budget / entry_price
+Cap individual positions at small/med/large as configured
+ File: Update training entry point
+
+Allow runtime override of daily targets (CLI arg or env var)
+Example: python train.py --daily_target 5.0 --daily_risk -2.0
+ Test: Run backtest with different daily targets
+
+Target +2.5%: baseline
+Target +5.0%: aggressive (agent scales up positions)
+Target +1.0%: conservative (agent scales down)
+Verify metrics scale appropriately
+Success Criteria:
+
+Backtest runs with configurable targets
+Position sizes adjust relative to target
+Metrics show appropriate risk/reward tradeoff for each target
+3. Add Sharpe & Sortino Metrics
+ File: Create monitoring/metrics_calculator.py
+
+Function: calculate_sharpe(returns_series) → float
+Function: calculate_sortino(returns_series) → float
+Function: calculate_max_dd_from_peak(equity_series) → float, duration
+Function: calculate_profit_factor(trades) → float
+Function: calculate_recovery_time(equity_series, dd_idx) → days
+ Update test_run.py
+
+Import metrics calculator
+Compute Sharpe, Sortino, max DD, profit factor after test run
+Output to metrics_summary.json:
+{
+"sharpe": 1.2,
+"sortino": 1.8,
+"max_dd": 0.08,
+"profit_factor": 2.3,
+"hit_rate": 0.65,
+"recovery_days": 5
+}
+ Update dashboard (monitoring/dashboard_app.py)
+
+Display Sharpe, Sortino, max DD in summary cards
+Add chart: equity curve with DD regions highlighted
+Add table: worst 5 days (tail risk analysis)
+Success Criteria:
+
+Metrics Summary JSON generated after each test run
+Dashboard shows Sharpe/Sortino prominently
+All metrics align with industry standards
+4. Add News Awareness Feature
+ File: Create env/news_detector.py
+
+Function: is_high_impact_news_window(timestamp, minutes_forward=60) → bool
+Data source: MQL5 economic calendar
+Cache calendar locally (update daily)
+Example: ECB decision at 13:45 CET → returns True for 13:00–14:45
+ Update env/data_bridge.py
+
+Add feature: high_impact_news_soon (boolean, normalized to [0,1])
+Include in state observation for agent
+ Update reward function (env/ftmo_game.py)
+
+Add penalty:
+if high_impact_news_active and num_open_positions > 0:
+reward -= 0.5 * num_open_positions
+Log: trades during news vs. non-news windows
+ Test: Run backtest; compare stats
+
+Trades during high-impact news: count, avg PnL
+Trades during calm periods: count, avg PnL
+Agent should learn to reduce size or avoid; optional
+Success Criteria:
+
+Feature is available in state
+Backtest trades logged with "news_active" flag
+Dashboard shows % trades during news
+5. Hard Kill Switches in MT5Bridge
+ File: Update execution/mt5_bridge.py
+
+Add class variables for thresholds:
+
+KILL_EQUITY_DD = 0.05 # Kill if equity down 5% from peak
+KILL_CONSECUTIVE_LOSSES = 5 # Kill if 5+ losing trades in a row
+KILL_DAILY_LOSS = 0.03 # Kill if down 3% in a single day
+Add method: check_kill_switches() → bool
+
+Returns True if any kill condition met
+Logs which condition triggered
+Modify execute_action():
+
+if self.check_kill_switches():
+self.flatten_all_positions()
+self.send_alert("EMERGENCY: Kill switch activated! Check bot.")
+return
+Add method: send_alert(message) → bool
+
+Webhook to Slack / email / webhook URL (configurable)
+Include: timestamp, equity, trigger reason
+ Update config
+
+Add: KILL_THRESHOLDS section with all thresholds
+Add: ALERT_WEBHOOK_URL (Slack webhook or email)
+ Test kill switches
+
+Backtest: artificially trigger each condition
+Verify: positions close, alert sent (or logged)
+Success Criteria:
+
+Kill switches halt trading on threshold breach
+Alerts logged or sent (mock if no live webhook)
+No positions remain open after kill trigger
+6. Multi-Seed Robustness Test
+ File: Create training/multi_seed_runner.py
+
+Script to train curriculum 5 times with seeds [0,1,2,3,4]
+Each seed saves model separately: model_seed_0.pt, etc.
+For each seed: run forward test, collect metrics
+Compare: Sharpe, max DD, pass rate across seeds
+Output: seed_robustness_report.csv
+ Run multi-seed test
+
+Seeds 0–4: train curriculum → forward test
+Collect: Sharpe, max DD, pass rate, profit factor
+Compute: mean, std, min, max
+Rule: Reject if any seed Sharpe < 0.8 OR variance > 0.4
+ Document results
+
+Table in dashboard or report
+Flag: "PASS" if all seeds meet thresholds, "FAIL" otherwise
+Success Criteria:
+
+All 5 seeds trained without errors
+Robustness report shows low variance (std < 0.3 for Sharpe)
+Dashboard displays seed comparison
+7. Slippage / Commission Analysis
+ File: Create monitoring/slippage_analyzer.py
+
+Function: compare_backtest_vs_live_metrics(backtest_csv, live_csv)
+Compare: assumed spread vs. real spread
+Compare: assumed commission vs. real commission
+Output: slippage_impact_report.json
+ Update dashboard
+
+Display: "Backtested Sharpe" vs. "Live Sharpe" (if live data available)
+Display: assumed vs. real spread (pips)
+Flag: "ALERT: Live underperforming backtest by >1% — check slippage"
+ Backtest validation
+
+Use realistic spreads (not 1 pip; use MT5 actual)
+Apply FTMO fees (from step 1)
+Run full validation set again
+Document performance impact of slippage + fees
+Success Criteria:
+
+Slippage report generated
+Backtest metrics updated with realistic costs
+Performance delta < 5% between backtest and live (first week)
+8. Reward-PnL Correlation Check
+ During training: Log training reward per episode
+
+ After training: Compute test-set Sharpe for same model
+
+ Analysis: Scatter plot training_reward vs. test_sharpe
+
+ Compute: Correlation coefficient (should be >0.7)
+
+ Rule: If correlation < 0.5, reward function is misaligned
+
+ Output: reward_correlation_report.json
+
+{
+"correlation": 0.75,
+"status": "PASS — reward aligns with Sharpe",
+"recommendation": "Keep reward function"
+}
+Success Criteria:
+
+Reward-Sharpe correlation computed
+Correlation > 0.7 (reward predicts Sharpe well)
+Report saved for analysis
+9. Profit Factor & Hit Rate Calculation
+ File: Update monitoring/metrics_calculator.py
+
+Function: calculate_profit_factor(trades_list) → float
+Profit factor = sum(winning trades PnL) / abs(sum(losing trades PnL))
+Function: calculate_hit_rate(trades_list) → float
+Function: calculate_avg_win_loss_ratio(trades_list) → float
+ Update test output
+
+Compute profit factor for validation + forward test
+Update metrics_summary.json:
+{
+"profit_factor": 2.1,
+"hit_rate": 0.58,
+"avg_win_loss_ratio": 1.8
+}
+ Update dashboard
+
+Display profit factor prominently (target > 1.5)
+Display hit rate vs. break-even hit rate
+Example: "Hit Rate: 58% (break-even at 50%)"
+Success Criteria:
+
+Profit factor calculated for all test runs
+Metrics dashboard shows all trade statistics
+Rule applied: reject if profit factor < 1.2
+10. Tail Risk Analysis (Worst Days Distribution)
+ File: Create monitoring/tail_risk_analyzer.py
+
+Function: analyze_worst_days(daily_returns, percentile=5) → dict
+Extract: worst 5% of days
+Compute: mean loss on worst days, count, frequency
+Output: distribution statistics, histogram plot
+ Update dashboard
+
+Add chart: histogram of daily returns (highlight tail)
+Add metric: "Worst 5 days avg loss: -1.2%"
+Add alert: "Worst single day: -2.5% (REVIEW)"
+ Test: Compare tail risk across market regimes
+
+Trending market: worse days less extreme?
+Choppy market: worse days more extreme?
+Success Criteria:
+
+Tail risk report generated
+Dashboard shows worst days distribution
+No single day loss > 2% (or flag for review)
+✅ TIER 2: Before Forward Testing (Week 3)
+11. Walk-Forward Evaluation Pipeline
+ File: Create training/walk_forward_trainer.py
+
+Define rolling windows:
+
+Window 1: Train [2021-02-01, 2023-12-31], Test [2024-01-01, 2024-06-30]
+Window 2: Train [2023-01-01, 2024-06-30], Test [2024-07-01, 2024-12-31]
+Window 3: Train [2024-01-01, 2024-12-31], Test [2025-01-01, 2025-03-31]
+For each window:
+
+Train curriculum
+Evaluate on test set
+Record: Sharpe, max DD, pass rate
+Output: walk_forward_report.csv
+
+window, train_end, test_start, test_end, sharpe, max_dd, pass_rate
+1, 2023-12-31, 2024-01-01, 2024-06-30, 1.2, 0.07, 0.65
+2, 2024-06-30, 2024-07-01, 2024-12-31, 0.9, 0.09, 0.55
+3, 2024-12-31, 2025-01-01, 2025-03-31, 1.1, 0.08, 0.62
+ Rule: All windows must have Sharpe > 0.9
+
+If any window drops < 0.8: regime shift detected
+Investigate: market structure change? Strategy weakness?
+Success Criteria:
+
+Walk-forward test runs without errors
+Report shows consistent performance across windows
+No single window fails Sharpe threshold
+12. Market Regime Detection
+ File: Create monitoring/regime_detector.py
+
+Function: classify_regime(equity_series, volatility_series) → str
+
+Low vol: volatility < 20th percentile → "calm"
+Med vol: 20–80th percentile → "normal"
+High vol: > 80th percentile → "volatile"
+Function: separate_metrics_by_regime(trades, regime_labels) → dict
+
+Metrics for each regime independently
+ Analyze validation set by regime
+
+Compute: Sharpe, pass rate for each regime
+Check: Is performance consistent across regimes?
+Flag: If high-vol performance drops >30%, strategy is regime-dependent
+ Update dashboard
+
+Add filter: show metrics for "Calm / Normal / Volatile" separately
+Add chart: equity curve colored by regime
+Success Criteria:
+
+Regime classification working
+Performance metrics separated by regime
+No single regime shows poor performance
+13. Position Holding Time Analysis
+ File: Create monitoring/trade_duration_analyzer.py
+
+Function: analyze_trade_durations(trades) → dict
+
+avg, min, max holding time
+distribution (histogram)
+Flag: If avg < 5 minutes: overtrading (add penalty in reward)
+
+Flag: If avg > 4 hours: too long (may be holding losers)
+
+ Update reward function
+
+Add penalty:
+avg_hold_time = mean(trade_durations)
+if avg_hold_time < 5: # Overtrading
+reward -= 0.5
+ Test: Retrain with holding time penalty
+
+Compare: trade duration before vs. after
+Compare: Sharpe improvement/degradation
+Success Criteria:
+
+Trade duration analysis available
+Avg holding time in reasonable range (10–120 minutes)
+Reward penalty functional
+14. Enforce Trading Hours / News Blackout
+ File: Update env/ftmo_game.py
+
+Add: no open positions after 22:50 CET Friday
+
+Add: forced close if position held past close
+
+Add: mask action to FLAT-only during high-impact news (or just penalize; your choice)
+
+ Test: Backtest with hour/news restrictions
+
+Count trades avoided due to time restriction
+Count trades during news window
+Verify no positions open after 22:50 Friday
+Success Criteria:
+
+No positions held over weekend
+No trades during high-impact news (or penalized)
+Backtest metrics show impact of restrictions
+15. Sharpe Bonus Integration (Optional)
+ Update env/ftmo_game.py reward function
+
+Compute rolling Sharpe (last 20 days)
+
+Add bonus:
+
+if rolling_sharpe > 1.0 and ftmo_pass_today:
+reward += 0.1 * (rolling_sharpe - 1.0) # Extra bonus
+Track all-time high Sharpe:
+
+if current_sharpe > all_time_high_sharpe:
+reward += 0.2
+ Update W&B logging
+
+Log: rolling_sharpe, all_time_high_sharpe per episode
+ Test: Train with and without Sharpe bonus
+
+Compare: final Sharpe with vs. without bonus
+Compare: convergence speed
+Success Criteria:
+
+Sharpe bonus applies only on passing FTMO days
+All-time high bonus triggers appropriately
+Training metrics show Sharpe improvement
+✅ TIER 3: Ongoing Monitoring (After Deployment)
+16. Real-Time Dashboard Alerts
+ Update monitoring/dashboard_app.py
+
+Display: current DD %, cumulative daily loss, position count
+Alert thresholds:
+DD > 2%: yellow warning
+DD > 4%: red alert
+Consecutive losses > 3: yellow warning
+Kill switch status: display if active
+ Implement Slack/email alerts
+
+Webhook integration in MT5Bridge
+Send alert on: kill switch, DD threshold breach, news window
+Success Criteria:
+
+Dashboard updates in real-time
+Alerts triggered at correct thresholds
+User notified of critical events
+17. Daily Performance Report Generator
+ File: Create monitoring/daily_report.py
+
+Runs at market close (17:00 CET)
+Computes: Sharpe (last 20 days), pass rate (last 5 days), slippage
+Output: CSV + JSON report
+ Trigger retraining if:
+
+Sharpe drops < 0.8 for 3 consecutive days
+Pass rate drops < 50% for 2 consecutive days
+ Output format:
+
+{
+"date": "2025-05-28",
+"daily_return": 0.025,
+"daily_sharpe": 1.15,
+"rolling_sharpe_20d": 0.95,
+"consecutive_pass_days": 7,
+"recommendation": "CONTINUE"
+}
+Success Criteria:
+
+Daily report generates automatically
+Retraining triggered at thresholds
+Historical reports stored for analysis
+18. Quarterly Retraining Schedule
+ File: Create training/retraining_scheduler.py
+
+Schedule: every 3 months (quarterly)
+Trigger: retrain on latest 12 months of data
+A/B test: old model vs. new model on same 1-week data
+Deploy new only if Sharpe improves >10%
+ Logging: Track which model deployed when
+
+Model version + deployment date
+Success Criteria:
+
+Retraining runs quarterly
+A/B comparison automated
+Deploy only on improvement
+19. Concentration & Leverage Report
+ File: Create monitoring/concentration_analyzer.py
+
+Daily report: total notional exposure, per-symbol exposure
+Rule: Stop if total notional > 5% OR single symbol > 3%
+ Update MT5Bridge
+
+Check concentration before executing action
+Block action if threshold exceeded
+Log: "Rejected action — would exceed leverage limit"
+Success Criteria:
+
+Concentration tracked daily
+Thresholds enforced
+No overleveraged positions
+20. Performance Regression Detection
+ File: Create monitoring/regression_detector.py
+
+Compare: current performance vs. baseline (training Sharpe)
+Flag: If current Sharpe < baseline * 0.85, regression detected
+Alert: "Performance degraded 15% below baseline — investigate"
+ Update dashboard
+
+Show: baseline Sharpe vs. current Sharpe
+Trend chart: Sharpe over last 30 days
+Success Criteria:
+
+Regression detection working
+Alerts triggered on performance drops
+Historical trend visible
+📊 Verification Checklist (Pre-Live)
+ Metrics Generated:
+
+ metrics_summary.json includes Sharpe, Sortino, max DD, profit factor
+ seed_robustness_report.csv shows 5 seeds, all pass thresholds
+ walk_forward_report.csv shows 3+ windows, all Sharpe > 0.9
+ slippage_impact_report.json shows discrepancy < 5%
+ Configuration Working:
+
+ Daily profit target adjustable (test +2.5%, +5%, +1.0%)
+ Daily risk limit adjustable (test -1%, -2%)
+ Position sizes scale with targets
+ Config stored in YAML + runtime override works
+ Risk Controls Functional:
+
+ Kill switches trigger on threshold breach
+ Alerts send (or log if no webhook)
+ No positions held over weekend
+ Concentration limits enforced
+ News & Fees Integrated:
+
+ News feature available in state
+ FTMO fees subtracted from backtest PnL
+ Backtest metrics include fee impact
+ Net PnL (after fees) shown in reports
+ Dashboard Updated:
+
+ Sharpe, Sortino, max DD displayed
+ Worst 5 days highlighted
+ Trade statistics (profit factor, hit rate) shown
+ Real-time DD %, position count, kill switch status
+ Alerts visible (yellow/red thresholds)
+ Testing Complete:
+
+ Multi-seed test passed (variance < 0.4)
+ Walk-forward test passed (all windows Sharpe > 0.9)
+ Slippage analysis complete (backtest updated)
+ News/hours restrictions tested
+ Reward-Sharpe correlation > 0.7
+🚀 Deployment Readiness Gate
+Before deploying to live trading, CONFIRM:
+
+✅ All Tier 1 items complete
+✅ All Tier 2 items complete (walk-forward, kill switches)
+✅ Verification checklist 100% complete
+✅ Last 3 days: Sharpe > 0.9, pass rate > 60%, no alerts
+✅ MT5 paper trading tested (1 week) with no anomalies
+✅ Daily targets & risk limits set correctly for your account
+✅ Kill switch webhook configured & tested
+✅ Daily report automation tested
+📁 Files to Create/Modify
+New Files:
+env/ftmo_fees.py — Transaction fee calculator
+env/news_detector.py — News awareness features
+monitoring/metrics_calculator.py — Sharpe, Sortino, profit factor
+monitoring/slippage_analyzer.py — Backtest vs. live comparison
+monitoring/tail_risk_analyzer.py — Worst days distribution
+monitoring/regime_detector.py — Market regime classification
+monitoring/trade_duration_analyzer.py — Holding time analysis
+monitoring/daily_report.py — Daily performance report
+monitoring/concentration_analyzer.py — Leverage/concentration tracking
+monitoring/regression_detector.py — Performance degradation detection
+training/multi_seed_runner.py — Multi-seed robustness test
+training/walk_forward_trainer.py — Walk-forward evaluation
+Modified Files:
+env/ftmo_game.py — Integrate fees, news, Sharpe bonus, hard kill switches
+env/data_bridge.py — Add news feature to state
+execution/mt5_bridge.py — Add kill switches, alerts, concentration checks
+config/training_config.yaml — Add daily targets, risk limits, thresholds
+test_run.py — Call metrics calculator, output summary JSON
+monitoring/dashboard_app.py — Display new metrics, alerts, regime info
+train.py — Accept runtime config overrides
+📝 Notes
+Fee Impact: Expect 1–3% annual return reduction (FTMO fees on all trades)
+News Handling: Feature is in state; let agent learn to adapt (don't force FLAT)
+Daily Targets: Normalize position size to remaining daily budget
+Sharpe Bonus: Optional; only apply on passing FTMO days to avoid conflicts
+Multi-seed: High variance (>0.4 Sharpe std) indicates overfitting
+Walk-forward: Should show Sharpe consistently > 0.9; if drops, strategy may be regime-specific
+✅ Status Tracking
+Phase	Task	Status	Owner	ETA
+Tier 1	Transaction fees	⬜ Pending		Day 1–2
+Tier 1	Daily targets config	⬜ Pending		Day 2–3
+Tier 1	Sharpe/Sortino metrics	⬜ Pending		Day 3–4
+Tier 1	News awareness	⬜ Pending		Day 4–5
+Tier 1	Hard kill switches	⬜ Pending		Day 5–6
+Tier 1	Multi-seed robustness	⬜ Pending		Day 6–8
+Tier 1	Slippage analysis	⬜ Pending		Day 8–9
+Tier 1	Reward-Sharpe correlation	⬜ Pending		Day 9
+Tier 1	Profit factor & hit rate	⬜ Pending		Day 9–10
+Tier 1	Tail risk analysis	⬜ Pending		Day 10–11
+Tier 2	Walk-forward evaluation	⬜ Pending		Day 12–15
+Tier 2	Regime detection	⬜ Pending		Day 13–14
+Tier 2	Holding time analysis	⬜ Pending		Day 14
+Tier 2	Trading hours blackout	⬜ Pending		Day 15
+Tier 2	Sharpe bonus integration	⬜ Pending		Day 16
+Last Updated: 2025-05-28
+Version: 1.0 (Initial Plan)

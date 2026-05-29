@@ -1,0 +1,119 @@
+
+# ── Symbols to train on ────────────────────────────────────────────────────────
+# Change this list to select which instruments to include.
+symbols:
+  - EURUSD
+  - GBPUSD
+  - XAUUSD
+  - US30
+
+# ── CSV file map ───────────────────────────────────────────────────────────────
+# Filenames relative to the project root (or set data_dir below).
+csv_map:
+  EURUSD: "EURUSD_M1_202101131130_202605270000_2020_2026.csv"
+  GBPUSD: "GBPUSD_M1_202101131952_202605270000.csv"
+  XAUUSD: "XAUUSD_M1_202009230753_202605262259.csv"
+  US30:   "US30_M1_202007231046_202605262359.csv"
+
+# Optional explicit folder to search first (leave null to use project root)
+data_dir: null
+
+# ── Date splits ────────────────────────────────────────────────────────────────
+# All dates are CET/CEST boundaries.
+dates:
+  train_start: "2021-02-01"    # earliest common date across all 4 symbols
+  train_end:   "2024-06-30"
+  val_start:   "2024-07-01"
+  val_end:     "2025-03-31"
+  fwd_start:   "2025-04-01"
+  fwd_end:     null             # null = present
+
+# ── FTMO profile ───────────────────────────────────────────────────────────────
+TRADING_MODE: "ftmo"
+FTMO:
+  # Daily profit target (as decimal: 0.025 = 2.5%)
+  daily_profit_target_pct: 0.025
+  # Max intraday drawdown (trailing DD from intraday high)
+  daily_max_drawdown_pct:  0.010
+  # Training mode: can continue trading past target if trailing DD not breached
+  # Live MT5 mode: HARD STOP at profit target or on DD breach
+  training_mode: true
+  # Position sizing relative to daily profit target
+  position_scale_factor: 0.33  # size = (daily_target * scale_factor) / num_symbols
+
+# ── Reward weights ─────────────────────────────────────────────────────────────
+REWARD:
+  pass_day_bonus:        2.0
+  ok_day_bonus:          0.5
+  fail_day_penalty:      -2.0
+  streak_scale:          0.1
+  low_dd_threshold:      0.005
+  low_dd_bonus:          0.3
+  # Sharpe bonus (optional — only fires on passing FTMO days)
+  sharpe_bonus_enabled:  false
+  sharpe_bonus_scale:    0.1    # reward += 0.1 * (rolling_sharpe - 1.0)
+  sharpe_ath_bonus:      0.2    # reward += 0.2 on new all-time-high Sharpe
+
+# ── Kill switches ───────────────────────────────────────────────────────────────
+KILL_THRESHOLDS:
+  equity_dd_pct:          5.0   # kill if equity down 5% from peak
+  consecutive_losses:     5     # kill if 5+ losing trades in a row
+  daily_loss_pct:         3.0   # kill if down 3% in single day
+
+# ── Alert webhook (set URL to enable Slack/email notifications) ─────────────────
+ALERTS:
+  webhook_url: null             # e.g. https://hooks.slack.com/...
+  log_to_file: true             # always log alerts to alerts.log
+
+# ── DQN hyper-parameters ──────────────────────────────────────────────────────
+RL:
+  LKBK:            20
+  HIDDEN_MULT:     2
+  ACTIVATION_FUN:  relu
+  LEARNING_RATE:   0.001
+  LOSS_FUNCTION:   mse
+  MAX_MEM:         2000
+  DISCOUNT_RATE:   0.95
+  EPSILON:         0.9
+  EPS_MIN:         0.05
+  BATCH_SIZE:      32
+  UPDATE_QR:       true
+  PRELOAD:         false
+  TEST_MODE:       false
+
+# ── Action / risk ──────────────────────────────────────────────────────────────
+ACTIONS:
+  num_actions: 7
+  risk_fractions:
+    small: 0.005
+    med:   0.010
+    large: 0.020
+
+# ── Curriculum ─────────────────────────────────────────────────────────────────
+CURRICULUM:
+  advance_consecutive_pass_days: 10
+  phases:
+    - id: 1
+      name: "CCI alignment (1m+15m)"
+      mask: "phase1_cci"
+      reward_function: "reward_ftmo_pnl"
+    - id: 2
+      name: "SMA on BB upper band (1m+1H)"
+      mask: "phase2_bb_upper"
+      reward_function: "reward_ftmo_pnl"
+    - id: 3
+      name: "BB midlines (1m+15m)"
+      mask: "phase3_bb_mid"
+      reward_function: "reward_ftmo_pnl"
+    - id: 4
+      name: "FTMO consistency (no mask)"
+      mask: null
+      reward_function: "reward_ftmo_pnl"
+
+# ── Output paths ───────────────────────────────────────────────────────────────
+PATHS:
+  weights_dir:    "checkpoints"
+  trade_logs_dir: "trade_logs"
+  shap_logs_dir:  "shap_logs"
+  data_cache_dir: "data_cache"
+  metrics_file:   "metrics.csv"

@@ -1,0 +1,109 @@
+
+# Self-Healing FTMO RL Trading System — Master Config
+
+# ── Trading mode ─────────────────────────────────────────────────────────────
+TRADING_MODE: "ftmo"           # "ftmo" | "free"
+
+# ── FTMO daily profile ────────────────────────────────────────────────────────
+FTMO:
+  daily_profit_target_pct: 0.025    # 2.5 % of start-of-day equity
+  daily_max_drawdown_pct:  0.010    # 1.0 % trailing DD from intraday high
+
+# ── MT5 instruments ───────────────────────────────────────────────────────────
+MT5:
+  login:    0                        # fill in before running
+  password: ""
+  server:   ""
+  symbols:
+    - EURUSD
+    - GBPUSD
+    - XAUUSD
+    - US30
+    - NAS100
+  timeframes: [1440, 60, 15, 1]     # minutes: 1D, 1H, 15m, 1m
+  timezone: "Europe/Berlin"         # CET/CEST
+
+# ── Date ranges ───────────────────────────────────────────────────────────────
+DATA:
+  train_start:   "2018-01-01"
+  train_end:     "2022-12-31"
+  val_start:     "2023-01-01"
+  val_end:       "2023-12-31"
+  fwd_start:     "2024-01-01"
+  fwd_end:       null               # null = today
+
+# ── Action space ──────────────────────────────────────────────────────────────
+ACTIONS:
+  # 0=flat, 1=buy_small, 2=buy_med, 3=buy_large, 4=sell_small, 5=sell_med, 6=sell_large
+  num_actions: 7
+  # initial risk fractions (learnable; training may override)
+  risk_fractions:
+    small: 0.005   # 0.5 % of equity
+    med:   0.010   # 1.0 %
+    large: 0.020   # 2.0 %
+
+# ── DQN hyper-parameters ──────────────────────────────────────────────────────
+RL:
+  LKBK:            20
+  HIDDEN_MULT:     2
+  ACTIVATION_FUN:  relu
+  LEARNING_RATE:   0.001
+  LOSS_FUNCTION:   mse
+  MAX_MEM:         2000
+  DISCOUNT_RATE:   0.95
+  EPSILON:         0.9
+  EPS_MIN:         0.05
+  BATCH_SIZE:      32
+  UPDATE_QR:       true
+  PRELOAD:         false
+  TEST_MODE:       false
+
+# ── Curriculum phases ─────────────────────────────────────────────────────────
+# Advance to next phase after 10 consecutive pass-days (return >=2.5%, DD <=1%)
+CURRICULUM:
+  advance_consecutive_pass_days: 10
+
+  phases:
+    - id: 1
+      name: "CCI alignment (1m+15m)"
+      mask: "phase1_cci"
+      data_slice: "train"
+      ftmo_override: null            # use global FTMO profile
+      reward_function: "reward_ftmo_pnl"
+
+    - id: 2
+      name: "SMA on BB upper band (1m+1H)"
+      mask: "phase2_bb_upper"
+      data_slice: "train"
+      ftmo_override: null
+      reward_function: "reward_ftmo_pnl"
+
+    - id: 3
+      name: "BB midlines (1m+15m)"
+      mask: "phase3_bb_mid"
+      data_slice: "train"
+      ftmo_override: null
+      reward_function: "reward_ftmo_pnl"
+
+    - id: 4
+      name: "FTMO consistency (no mask)"
+      mask: null
+      data_slice: "train"
+      ftmo_override: null
+      reward_function: "reward_ftmo_pnl"
+
+# ── Reward weights ────────────────────────────────────────────────────────────
+REWARD:
+  pass_day_bonus:   2.0
+  ok_day_bonus:     0.5
+  fail_day_penalty: -2.0
+  streak_scale:     0.1    # bonus = streak_scale * days_in_streak
+  low_dd_threshold: 0.005  # if dd_d < this, award low_dd_bonus
+  low_dd_bonus:     0.3
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+PATHS:
+  weights_dir:    "checkpoints"
+  trade_logs_dir: "trade_logs"
+  shap_logs_dir:  "shap_logs"
+  data_cache_dir: "data_cache"

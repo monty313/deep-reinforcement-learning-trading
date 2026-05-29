@@ -1,0 +1,53 @@
+# Large MT5 data files
+*_M1_*.csv
+*_M5_*.csv
+*_M15_*.csv
+*_H1_*.csv
+*_D1_*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints & large binary outputs
+checkpoints/
+*.h5
+*.pkl
+*.pt
+*.onnx
+
+# Generated reports (optional — remove lines below to track them)
+metrics_summary.json
+tail_risk_report.json
+slippage_impact_report.json
+trade_duration_report.json
+seed_robustness_report.csv
+seed_robustness_summary.json
+walk_forward_report.csv
+walk_forward_summary.json
+reward_correlation_report.json
+regression_report.json
+concentration_report.json
+kill_switch.log
+model_version_log.json
+daily_reports/
+
+# OS
+.DS_Store
+Thumbs.db
