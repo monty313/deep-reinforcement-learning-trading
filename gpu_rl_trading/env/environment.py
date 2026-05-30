@@ -25,8 +25,17 @@ NUM_ACTIONS = 7
 
 # sign: +1 buy, -1 sell, 0 flat
 _SIGN_T = torch.tensor([0, 1, 1, 1, -1, -1, -1], dtype=torch.float32)
-# risk fraction of equity per lot
-_RISK_T = torch.tensor([0.0, 0.005, 0.010, 0.020, 0.005, 0.010, 0.020], dtype=torch.float32)
+
+# Size multipliers: fraction of the "target-gap lot" to trade.
+# small = 25% of what's needed to close the gap
+# med   = 50%
+# large = 100%
+# Agent learns which size is appropriate given current FTMO state.
+_SIZE_T = torch.tensor([0.0, 0.25, 0.50, 1.00, 0.25, 0.50, 1.00], dtype=torch.float32)
+
+# Hard floor/ceiling on lots regardless of dynamic sizing (FTMO 1:100 leverage)
+_MIN_LOTS = 0.01
+_MAX_LOTS = 100.0   # 100 lots = full 1:100 leverage on $100k account
 
 # ── feature column indices in build_feature_matrix output ────────────────────
 # 0=open 1=high 2=low 3=close 4=volume
@@ -101,7 +110,7 @@ class BatchedFTMOEnv:
 
         # Action lookup tables on device
         self._sign = _SIGN_T.to(device)
-        self._risk = _RISK_T.to(device)
+        self._size = _SIZE_T.to(device)
 
         # Allocate episode tensors (filled in reset())
         self._start_idx    = torch.zeros(self.B, dtype=torch.long, device=device)
@@ -121,7 +130,8 @@ class BatchedFTMOEnv:
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _compute_state_dim(self) -> int:
-        return self.lkbk * self.F * len(self.tf_factors) + 3
+        # indicator lookback window + 6 FTMO/position features
+        return self.lkbk * self.F * len(self.tf_factors) + 6
 
     def _abs_idx(self) -> torch.Tensor:
         return (self._start_idx + self._curr_step).clamp(0, self.T - 1)
@@ -171,8 +181,18 @@ class BatchedFTMOEnv:
             (curr_close - self._entry_px) / (self._entry_px + 1e-8) * self._position,
             torch.zeros_like(curr_close),
         )
-        eq_chg = (self._equity - self.initial_equity) / self.initial_equity
-        parts.append(torch.stack([self._position, unrealised, eq_chg], dim=1))
+        eq_chg      = (self._equity - self.initial_equity) / self.initial_equity
+        # FTMO state features: gap to target, remaining dd headroom, daily return so far
+        target_eq   = self._day_start_eq * (1.0 + self.target_pct)
+        gap_to_tgt  = (target_eq - self._equity) / (self.initial_equity + 1e-8)   # normalised
+        dd_used     = (self._day_high_eq - self._equity) / (self._day_high_eq + 1e-8)
+        dd_headroom = (self.max_dd_pct - dd_used).clamp(min=0.0)
+        daily_ret   = (self._equity - self._day_start_eq) / (self._day_start_eq + 1e-8)
+        pos_feat    = torch.stack(
+            [self._position, unrealised, eq_chg, gap_to_tgt, dd_headroom, daily_ret],
+            dim=1,
+        )
+        parts.append(pos_feat)
         return torch.cat(parts, dim=1)
 
     # ── phase mask ────────────────────────────────────────────────────────────
@@ -301,6 +321,60 @@ class BatchedFTMOEnv:
 
         return new_actions
 
+    # ── dynamic lot sizing ────────────────────────────────────────────────────
+    def _dynamic_lots(self, actions: torch.Tensor, curr_close: torch.Tensor) -> torch.Tensor:
+        """
+        Compute lot size dynamically based on current FTMO state.
+
+        Core idea: how many lots do I need to close the gap to the daily target
+        in a single average move (ATR)?  Then scale by the size multiplier the
+        agent chose (small=25%, med=50%, large=100%).
+
+        Formula:
+          gap_$      = max(target_equity - current_equity, 0)
+          atr_$      = atr_pips * pip_value_per_lot   (≈ ATR in price * 100_000)
+          target_lots = gap_$ / atr_$          → lots to close gap in one ATR move
+          lots        = target_lots * size_mult  → agent's chosen fraction
+
+        If already past target (gap=0), size off remaining drawdown headroom instead:
+          headroom_$ = max_dd_pct * current_equity - current_dd_$
+          lots       = (headroom_$ / atr_$) * size_mult * 0.5  (half headroom)
+
+        Clamped between _MIN_LOTS and _MAX_LOTS (1:100 leverage ceiling).
+        """
+        size_mult   = self._size[actions]                          # (B,) 0/0.25/0.5/1.0
+
+        # daily target gap in dollars
+        target_eq   = self._day_start_eq * (1.0 + self.target_pct)
+        gap_dollars = (target_eq - self._equity).clamp(min=0.0)   # (B,)
+
+        # ATR in price units from the 1m feature (col 5 = atr14)
+        abs_idx     = self._abs_idx()
+        atr_price   = self._feat_1m[abs_idx, COL_ATR14].clamp(min=1e-6)  # (B,)
+
+        # pip value per lot: for EURUSD 1 lot = 100,000 units,
+        # so $-value of 1 atr move = atr_price * 100_000
+        atr_dollars = atr_price * 100_000.0                        # (B,)
+
+        # lots needed to close the gap in one ATR move
+        target_lots = gap_dollars / (atr_dollars + 1e-8)           # (B,)
+
+        # when gap is already closed, size conservatively off drawdown headroom
+        headroom_dollars = (
+            self.max_dd_pct * self._equity
+            - (self._day_high_eq - self._equity).clamp(min=0.0)
+        ).clamp(min=0.0)
+        conservative_lots = (headroom_dollars / (atr_dollars + 1e-8)) * 0.5
+
+        base_lots = torch.where(gap_dollars > 0, target_lots, conservative_lots)
+
+        # apply agent's size choice and clamp to leverage limits
+        max_leverage_lots = (self._equity * 100.0 / 100_000.0).clamp(min=_MIN_LOTS)
+        lots = (base_lots * size_mult).clamp(min=_MIN_LOTS)
+        lots = torch.minimum(lots, max_leverage_lots)
+        lots = torch.minimum(lots, torch.tensor(_MAX_LOTS, device=self.device))
+        return lots
+
     # ── step ──────────────────────────────────────────────────────────────────
     def step(self, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -314,8 +388,7 @@ class BatchedFTMOEnv:
 
         # apply phase mask before executing actions
         actions = self._apply_phase_mask(actions, abs_idx)
-        sign     = self._sign[actions]
-        lots_frac = self._risk[actions]
+        sign    = self._sign[actions]
 
         # ── close on direction reversal ───────────────────────────────────────
         close_mask = self._active & (self._position != 0) & (sign != 0) & (sign != self._position)
@@ -334,17 +407,7 @@ class BatchedFTMOEnv:
         # ── open new position ─────────────────────────────────────────────────
         open_mask = self._active & (self._position == 0) & (sign != 0)
         if open_mask.any():
-            # FTMO 1:100 leverage. Risk sizing: lose risk_frac% of equity on a 20-pip move.
-            # pip_value for EURUSD = $10/pip per standard lot (100k units).
-            # lots = (equity * risk_frac) / (20 pips * $10/pip)
-            #      = equity * risk_frac / 200
-            # e.g. small (0.005): 100,000 * 0.005 / 200 = 2.5 lots
-            #      med   (0.010): 100,000 * 0.010 / 200 = 5.0 lots
-            #      large (0.020): 100,000 * 0.020 / 200 = 10.0 lots
-            # Max lots capped by leverage: equity * 100 / 100_000
-            max_lots = (self._equity * 100.0 / 100_000.0).clamp(min=0.01)
-            lots = (self._equity * lots_frac / 200.0).clamp(min=0.01)
-            lots = torch.minimum(lots, max_lots)
+            lots = self._dynamic_lots(actions, curr_close)
             self._position = torch.where(open_mask, sign,       self._position)
             self._entry_px = torch.where(open_mask, curr_close, self._entry_px)
             self._lots     = torch.where(open_mask, lots,       self._lots)
