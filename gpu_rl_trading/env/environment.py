@@ -517,6 +517,9 @@ class BatchedFTMOEnv:
             (curr_close - self._entry_px) * self._position * self._lots * 100_000.0,
             torch.zeros_like(self._position),
         )
+        # Guard NaN: if feature data has NaN, prices can become NaN and
+        # propagate silently. Replace NaN with 0 so equity stays finite.
+        unreal_pnl = torch.nan_to_num(unreal_pnl, nan=0.0, posinf=0.0, neginf=0.0)
         self._equity = self.initial_equity + self._realised_pnl + unreal_pnl
 
         # ── day boundary ──────────────────────────────────────────────────────

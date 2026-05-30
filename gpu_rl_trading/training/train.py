@@ -50,9 +50,18 @@ def load_eurusd_csv(csv_path: str, date_from: str = None, date_to: str = None) -
     return df[["open", "high", "low", "close", "volume"]].values.astype(np.float32)
 
 
+def _ckpt_episode(p: Path) -> int:
+    """Extract episode number from checkpoint filename for sorting. Returns -1 if unparseable."""
+    try:
+        return int(p.stem.split("_ep")[-1]) if "_ep" in p.stem else -1
+    except ValueError:
+        return -1
+
+
 def latest_checkpoint(ckpt_dir: Path, phase: int = None) -> Path | None:
+    """Return the checkpoint with the highest episode number (not mtime)."""
     pattern = f"*ph{phase}*.pt" if phase is not None else "*.pt"
-    files   = sorted(ckpt_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    files   = sorted(ckpt_dir.glob(pattern), key=_ckpt_episode)
     return files[-1] if files else None
 
 
@@ -189,9 +198,12 @@ def run_phase(
 
     # per-batch consecutive PASS day counter
     # restore from checkpoint if available so phase advancement progress is preserved
+    if resume_consec and len(resume_consec) != B:
+        print(f"  [resume] WARNING: BATCH_SIZE_ENV changed "
+              f"({len(resume_consec)} → {B}) — consec_pass reset to 0", flush=True)
     consec_pass = resume_consec if resume_consec and len(resume_consec) == B else [0] * B
     best_consec = max(consec_pass)
-    ep_in_phase = resume_ep_in_phase   # resume from where we left off, not from 0
+    ep_in_phase = resume_ep_in_phase
 
     if resume_consec or resume_ep_in_phase > 0:
         print(f"  [resume] consec_pass={consec_pass}  best={best_consec}"
@@ -285,13 +297,14 @@ def run_phase(
             "steps":        step,
         })
 
-        # checkpoint — save phase + consec_pass + ep_in_phase so resume is seamless
+        # checkpoint — save all resume state so resume is exact
         if ep_in_phase % CKPT_EVERY == 0:
             ck_path = ckpt_dir / f"eurusd_gpu_ph{phase}_ep{global_ep:04d}.pt"
             agent.save(str(ck_path), extra={
                 "phase":          phase,
                 "consec_pass":    consec_pass,
                 "ep_in_phase":    ep_in_phase,
+                "global_ep":      global_ep,   # authoritative episode counter
             })
 
         # flush CSVs every 20 episodes
@@ -304,13 +317,13 @@ def run_phase(
                   flush=True)
             agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"),
                        extra={"phase": phase, "consec_pass": consec_pass,
-                              "ep_in_phase": ep_in_phase})
+                              "ep_in_phase": ep_in_phase, "global_ep": global_ep})
             return global_ep, True, best_consec
 
     print(f"\n[PHASE {phase}] Max episodes ({MAX_EP_PHASE}) reached — advancing.", flush=True)
     agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"),
                extra={"phase": phase, "consec_pass": consec_pass,
-                      "ep_in_phase": ep_in_phase})
+                      "ep_in_phase": ep_in_phase, "global_ep": global_ep})
     return global_ep, False, best_consec
 
 
@@ -400,28 +413,39 @@ def run_training(
 
             ckpt_returned = agent.load(str(ck), partial=use_partial)
 
-            # extract episode number from filename — loud failure if pattern broken
-            stem = ck.stem
-            if "_ep" in stem:
-                try:
-                    resume_ep = int(stem.split("_ep")[-1])
-                except ValueError as e:
-                    print(f"[resume] WARNING: could not parse episode from '{stem}': {e}"
-                          f" — resuming from ep 0", flush=True)
-            else:
-                print(f"[resume] WARNING: no '_ep' in filename '{stem}' "
-                      f"— resuming from ep 0", flush=True)
+            # extract episode number — prefer metadata over filename
+            meta_ep   = ckpt_returned.get("global_ep", None)
+            fname_ep  = _ckpt_episode(ck)
 
-            # restore consec_pass and ep_in_phase if saved
+            if meta_ep is not None:
+                resume_ep = meta_ep
+                if fname_ep >= 0 and fname_ep != meta_ep:
+                    print(f"[resume] NOTE: filename says ep {fname_ep} "
+                          f"but metadata says ep {meta_ep} — using metadata", flush=True)
+            elif fname_ep >= 0:
+                resume_ep = fname_ep
+                print(f"[resume] episode from filename: {resume_ep}", flush=True)
+            else:
+                print(f"[resume] WARNING: cannot determine episode from '{ck.stem}' "
+                      f"— starting from ep 0", flush=True)
+
+            # validate phase match
+            if ckpt_phase != start_phase:
+                print(f"[resume] WARNING: checkpoint phase={ckpt_phase} "
+                      f"but start_phase={start_phase} — proceeding", flush=True)
+
+            # restore consec_pass, ep_in_phase if saved
             resume_consec      = ckpt_returned.get("consec_pass", None)
             resume_ep_in_phase = ckpt_returned.get("ep_in_phase", 0)
             if resume_consec:
-                print(f"[resume] consec_pass restored: {resume_consec}", flush=True)
+                print(f"[resume] consec_pass: {resume_consec}", flush=True)
             if resume_ep_in_phase:
-                print(f"[resume] ep_in_phase restored: {resume_ep_in_phase}", flush=True)
+                print(f"[resume] ep_in_phase: {resume_ep_in_phase}", flush=True)
 
-            print(f"[resume] Resuming from episode {resume_ep}  phase {ckpt_phase}"
-                  f"  ep_in_phase {resume_ep_in_phase}", flush=True)
+            print(f"[resume] ✓ ep={resume_ep}  phase={ckpt_phase}"
+                  f"  ep_in_phase={resume_ep_in_phase}  "
+                  f"replay={agent.memory.size}  epsilon={agent.epsilon:.3f}",
+                  flush=True)
         else:
             print("[resume] No checkpoint found — starting fresh.", flush=True)
 
