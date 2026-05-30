@@ -1,0 +1,2 @@
+episode,phase,total_reward,ep_bonus,best_consec,steps
+1,7,0.0,0.0,0,500

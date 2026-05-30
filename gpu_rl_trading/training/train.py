@@ -512,10 +512,43 @@ if __name__ == "__main__":
     parser.add_argument("--resume",      action="store_true")
     parser.add_argument("--start-phase", type=int, default=0)
     parser.add_argument("--batch",       type=int, default=None)
+    parser.add_argument("--test-mode",   action="store_true",
+                        help="Create synthetic CSV and run a short test training run")
     args = parser.parse_args()
 
     overrides = {"DATA_CSV_EURUSD": args.csv}
     if args.batch:
         overrides["BATCH_SIZE_ENV"] = args.batch
+
+    # If test-mode requested, generate a small synthetic TSV matching loader expectations
+    if args.test_mode:
+        import csv
+        from datetime import datetime, timedelta
+        test_path = Path("test_synthetic_eurusd.tsv")
+        T = 2000
+        start = datetime(2021, 1, 1, 0, 0, 0)
+        with test_path.open("w", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            writer.writerow(["<DATE>", "<TIME>", "<OPEN>", "<HIGH>", "<LOW>", "<CLOSE>", "<TICKVOL>"])
+            for i in range(T):
+                dt = start + timedelta(minutes=i)
+                date = dt.strftime("%Y.%m.%d")
+                time_s = dt.strftime("%H:%M:%S")
+                open_ = 1.1000 + (i % 100) * 1e-4
+                high  = open_ + 0.0005
+                low   = open_ - 0.0005
+                close = open_ + (0.0001 * ((i % 5) - 2))
+                vol   = 100 + (i % 10)
+                writer.writerow([date, time_s, f"{open_:.5f}", f"{high:.5f}", f"{low:.5f}", f"{close:.5f}", str(vol)])
+        overrides["DATA_CSV_EURUSD"] = str(test_path)
+        # make training very small/fast for smoke test
+        overrides.update({
+            "BATCH_SIZE_ENV": 2,
+            "EPISODE_BARS": 500,
+            "MAX_EPISODES_PER_PHASE": 1,
+            "CHECKPOINT_EVERY": 1000,
+            "MEMORY_SIZE": 1000,
+            "BATCH_SIZE_RL": 32,
+        })
 
     run_training(cfg=overrides, resume=args.resume, start_phase=args.start_phase)
