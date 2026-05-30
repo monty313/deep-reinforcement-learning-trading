@@ -186,7 +186,7 @@ class DQNAgent:
         ckpt_state_dim = ckpt.get("state_dim", self.state_dim)
 
         if partial and ckpt_state_dim != self.state_dim:
-            print(f"[transfer] state_dim {ckpt_state_dim} → {self.state_dim} "
+            print(f"[transfer] state_dim {ckpt_state_dim} -> {self.state_dim} "
                   f"(+{self.state_dim - ckpt_state_dim} features)", flush=True)
             self.q_net.load_partial(ckpt["q_net"], ckpt_state_dim)
             self.target_net.load_partial(ckpt["target"], ckpt_state_dim)

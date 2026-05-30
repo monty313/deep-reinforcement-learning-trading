@@ -14,10 +14,23 @@ def _rolling_mean(x: np.ndarray, n: int) -> np.ndarray:
 
 
 def _rolling_std(x: np.ndarray, n: int) -> np.ndarray:
-    out = np.full_like(x, np.nan)
-    for i in range(n-1, len(x)):
-        out[i] = x[i-n+1:i+1].std()
-    return out
+    out = np.full_like(x, np.nan, dtype=np.float32)
+    if n <= 0:
+        return out
+    if len(x) < n:
+        return out
+    try:
+        # numpy>=1.20 has sliding_window_view which enables a vectorized window
+        from numpy.lib.stride_tricks import sliding_window_view
+        windows = sliding_window_view(x, window_shape=n)
+        stds = windows.std(axis=1)
+        out[n-1:] = stds.astype(np.float32)
+        return out
+    except Exception:
+        # Fallback for older numpy versions: safe Python loop
+        for i in range(n-1, len(x)):
+            out[i] = x[i-n+1:i+1].std()
+        return out
 
 
 def sma(x: np.ndarray, n: int) -> np.ndarray:

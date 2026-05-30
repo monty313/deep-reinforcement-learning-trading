@@ -30,7 +30,15 @@ from gpu_rl_trading.agent.dqn import DQNAgent
 
 def load_eurusd_csv(csv_path: str, date_from: str = None, date_to: str = None) -> np.ndarray:
     print(f"[data] Loading {csv_path} ...", flush=True)
-    df = pd.read_csv(csv_path, sep="\t", dtype=str)
+    # Try common delimiters. Many CSVs are comma-separated; some are tab-separated.
+    try:
+        df = pd.read_csv(csv_path, sep="\t", dtype=str)
+        # if result looks like a single-column read, try autodetect
+        if df.shape[1] == 1:
+            df = pd.read_csv(csv_path, sep=None, engine="python", dtype=str)
+    except Exception:
+        # fallback to pandas delimiter sniffing
+        df = pd.read_csv(csv_path, sep=None, engine="python", dtype=str)
     df.columns = [c.strip().strip("<>").lower() for c in df.columns]
     df["datetime"] = pd.to_datetime(
         df["date"].str.replace(".", "-", regex=False) + " " + df["time"],
@@ -151,7 +159,7 @@ class EpisodeRewardShaper:
             ath_bonus      = min((phi_ep - self._ath_phi) * 0.10, 0.05)
             bonus         += ath_bonus
             self._ath_phi  = phi_ep
-            print(f"  [★ ATH Φ={phi_ep:.4f}]  pass={pass_rate:.1%}  "
+            print(f"  [ATH Phi={phi_ep:.4f}]  pass={pass_rate:.1%}  "
                   f"ret={avg_ret:+.2f}%  dd={avg_dd:.2f}%  bonus={ath_bonus:.4f}",
                   flush=True)
 
@@ -160,8 +168,8 @@ class EpisodeRewardShaper:
             self._phi_history.pop(0)
 
         if bonus != 0.0:
-            print(f"  [Φ shaping] ep={self.global_ep}  "
-                  f"Φ={phi_ep:.4f}  smooth={phi_smooth:.4f}  "
+            print(f"  [Phi shaping] ep={self.global_ep}  "
+                  f"Phi={phi_ep:.4f}  smooth={phi_smooth:.4f}  "
                   f"bonus={bonus:+.4f}", flush=True)
 
         return bonus
@@ -200,7 +208,7 @@ def run_phase(
     # restore from checkpoint if available so phase advancement progress is preserved
     if resume_consec and len(resume_consec) != B:
         print(f"  [resume] WARNING: BATCH_SIZE_ENV changed "
-              f"({len(resume_consec)} → {B}) — consec_pass reset to 0", flush=True)
+              f"({len(resume_consec)} -> {B}) — consec_pass reset to 0", flush=True)
     consec_pass = resume_consec if resume_consec and len(resume_consec) == B else [0] * B
     best_consec = max(consec_pass)
     ep_in_phase = resume_ep_in_phase
@@ -313,7 +321,7 @@ def run_phase(
 
         # ── advancement check ─────────────────────────────────────────────────
         if best_consec >= ADVANCE_DAYS:
-            print(f"\n[PHASE {phase}] ✓ {ADVANCE_DAYS} consecutive PASS days — advancing!",
+            print(f"\n[PHASE {phase}] ADVANCED: {ADVANCE_DAYS} consecutive PASS days!",
                   flush=True)
             agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"),
                        extra={"phase": phase, "consec_pass": consec_pass,
@@ -408,7 +416,7 @@ def run_training(
                       f"but start_phase={start_phase} — loading anyway", flush=True)
 
             if use_partial:
-                print(f"[resume] state_dim {ckpt_state_dim}→{env.state_dim} "
+                print(f"[resume] state_dim {ckpt_state_dim}->{env.state_dim} "
                       f"— transfer learning", flush=True)
 
             ckpt_returned = agent.load(str(ck), partial=use_partial)
@@ -442,7 +450,7 @@ def run_training(
             if resume_ep_in_phase:
                 print(f"[resume] ep_in_phase: {resume_ep_in_phase}", flush=True)
 
-            print(f"[resume] ✓ ep={resume_ep}  phase={ckpt_phase}"
+            print(f"[resume] OK ep={resume_ep}  phase={ckpt_phase}"
                   f"  ep_in_phase={resume_ep_in_phase}  "
                   f"replay={agent.memory.size}  epsilon={agent.epsilon:.3f}",
                   flush=True)
