@@ -1,6 +1,9 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 import csv
 import os
-from pathlib import Path
 from gpu_rl_trading.training.train import load_eurusd_csv
 
 
