@@ -38,7 +38,7 @@ CFG = {
     "SYNC_EVERY":               200,   # steps between target-net sync
     "EPSILON_DECAY_EPISODES":   500,   # episodes to decay from EPSILON to EPS_MIN
     "PHASE":                  0,      # starting phase (0-7)
-    "ADVANCE_DAYS":           10,     # consecutive PASS days to advance phase
+    "ADVANCE_DAYS":            5,     # consecutive PASS days within one episode to advance phase
     "MAX_EPISODES_PER_PHASE": 500,    # hard cap per phase
     "NUM_EPISODES":           200,    # legacy fallback (ignored in full curriculum)
     "CHECKPOINT_EVERY": 10,

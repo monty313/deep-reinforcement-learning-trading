@@ -195,10 +195,10 @@ def run_phase(
     Run one curriculum phase.
     Returns (global_ep, advanced, consecutive_pass_days_best).
 
-    Advances when ANY batch item hits 10 consecutive PASS days,
+    Advances when ANY batch item hits 5 consecutive PASS days within one episode,
     or when max_episodes_per_phase is reached.
     """
-    ADVANCE_DAYS   = cfg.get("ADVANCE_DAYS",             10)
+    ADVANCE_DAYS   = cfg.get("ADVANCE_DAYS",              5)
     MAX_EP_PHASE   = cfg.get("MAX_EPISODES_PER_PHASE",  500)
     CKPT_EVERY     = cfg.get("CHECKPOINT_EVERY",          10)
     B              = cfg["BATCH_SIZE_ENV"]
@@ -234,10 +234,11 @@ def run_phase(
         step      = 0
 
         while not dones.all():
-            actions              = agent.select_actions(state)
-            next_state, rewards, dones = env.step(actions)
-            ep_reward           += rewards
-            agent.store(state, actions, rewards, next_state, dones)
+            actions                              = agent.select_actions(state)
+            next_state, rewards, dones, exec_act = env.step(actions)
+            ep_reward                           += rewards
+            # store executed (masked) actions so Q-values reflect what actually ran
+            agent.store(state, exec_act, rewards, next_state, dones)
             agent.train_step()
             state = next_state
             step += 1
@@ -246,23 +247,23 @@ def run_phase(
         mean_reward  = ep_reward.mean().item()
         ftmo_summary = env.episode_summary()
 
-        # ── per-batch consecutive PASS tracking ───────────────────────────────
-        # group daily_metrics_log by batch, find each batch's longest consec streak
+        # ── per-batch consecutive PASS tracking (within this episode only) ──────
         ep_best_consec = 0
         batch_logs = {b: [] for b in range(B)}
         for row in env.daily_metrics_log:
             batch_logs[row["batch"]].append(row["ftmo_flag"])
 
         for b in range(B):
-            flags = batch_logs[b]
             streak = 0
-            for f in flags:
+            ep_max_streak = 0
+            for f in batch_logs[b]:
                 if f == "PASS":
                     streak += 1
-                    consec_pass[b] = max(consec_pass[b], streak)
+                    ep_max_streak = max(ep_max_streak, streak)
                 else:
                     streak = 0
-            ep_best_consec = max(ep_best_consec, consec_pass[b])
+            consec_pass[b] = ep_max_streak
+            ep_best_consec = max(ep_best_consec, ep_max_streak)
 
         best_consec = max(best_consec, ep_best_consec)
 
@@ -270,17 +271,13 @@ def run_phase(
         shaper.global_ep = global_ep
         ep_bonus = shaper.compute_bonus(env.daily_metrics_log)
         if ep_bonus != 0.0:
-            # Add to the last real terminal transition in the replay buffer
-            # by storing a proper (s, a, r=bonus, s', done=True) tuple using
-            # the final state the episode ended on — not a dummy zero state.
-            final_state = state   # state after last env.step()
-            agent.memory.push(
-                final_state,
-                torch.zeros(B, dtype=torch.long, device=device),
-                torch.full((B,), ep_bonus, device=device),
-                final_state,
-                torch.ones(B, dtype=torch.bool, device=device),
-            )
+            # Back-patch the bonus onto the B terminal transitions already in
+            # the replay buffer (the last env.step() stored them). This avoids
+            # injecting a fake (s, a=0, bonus, s, done=True) transition that
+            # would teach wrong Q-values for action 0.
+            buf = agent.memory
+            last_idx = torch.arange(buf.ptr - B, buf.ptr, device=device) % buf.capacity
+            buf.rewards[last_idx] = buf.rewards[last_idx] + ep_bonus
 
         agent.decay_epsilon(global_ep)
         ep_in_phase += 1
@@ -406,7 +403,7 @@ def run_training(
             ck = latest_checkpoint(ckpt_dir)   # fallback: any phase
 
         if ck:
-            ckpt_meta      = torch.load(str(ck), map_location="cpu")
+            ckpt_meta      = torch.load(str(ck), map_location="cpu", weights_only=False)
             ckpt_state_dim = ckpt_meta.get("state_dim", env.state_dim)
             ckpt_phase     = ckpt_meta.get("phase", start_phase)
             use_partial    = (ckpt_state_dim != env.state_dim)

@@ -475,10 +475,12 @@ class BatchedFTMOEnv:
         return lots
 
     # ── step ──────────────────────────────────────────────────────────────────
-    def step(self, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def step(self, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         actions : (B,) long tensor
-        Returns (next_state, rewards, dones) all shape (B,).
+        Returns (next_state, rewards, dones, executed_actions) all shape (B,).
+        executed_actions are the phase-masked actions actually applied — store
+        these in replay (not the raw selected actions) so Q-values are correct.
         Only active (not-done) episodes are updated; done episodes return zeros.
         """
         abs_idx    = self._abs_idx()
@@ -615,7 +617,7 @@ class BatchedFTMOEnv:
         self._active = self._active & ~dones
 
         next_state = self._get_state()
-        return next_state, rewards, dones
+        return next_state, rewards, dones, actions
 
     # ── summary helper ────────────────────────────────────────────────────────
     def episode_summary(self) -> str:

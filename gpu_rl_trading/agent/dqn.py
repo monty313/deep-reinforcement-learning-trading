@@ -101,10 +101,10 @@ class DQNAgent:
     def select_actions(self, state: torch.Tensor) -> torch.Tensor:
         """Epsilon-greedy. state: (B, state_dim) -> actions: (B,)."""
         B = state.shape[0]
-        if torch.rand(1).item() < self.epsilon:
-            return torch.randint(0, self.num_actions, (B,), device=self.device)
-        q = self.q_net(state)
-        return q.argmax(dim=1)
+        explore = torch.rand(B, device=self.device) < self.epsilon
+        greedy  = self.q_net(state).argmax(dim=1)
+        random  = torch.randint(0, self.num_actions, (B,), device=self.device)
+        return torch.where(explore, random, greedy)
 
     def store(self, state, action, reward, next_state, done):
         self.memory.push(state, action, reward, next_state, done)
@@ -119,7 +119,7 @@ class DQNAgent:
         s, a, r, ns, d = self.memory.sample(self.batch_size)
         with torch.no_grad():
             q_next  = self.target_net(ns).max(dim=1).values
-            targets = r + self.gamma * q_next * (~d)
+            targets = r + self.gamma * q_next * (1.0 - d.float())
 
         q_pred = self.q_net(s).gather(1, a.unsqueeze(1)).squeeze(1)
         loss   = F.mse_loss(q_pred, targets)
@@ -182,7 +182,7 @@ class DQNAgent:
             path    : path to .pt file
             partial : if True, use transfer learning when state_dim differs.
         """
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         ckpt_state_dim = ckpt.get("state_dim", self.state_dim)
 
         if partial and ckpt_state_dim != self.state_dim:

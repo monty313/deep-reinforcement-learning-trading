@@ -46,7 +46,7 @@ class TestBatchedFTMOEnv:
         env, cfg, device = setup
         state = env.reset()
         actions = torch.randint(0, NUM_ACTIONS, (2,), device=device)
-        next_state, rewards, dones = env.step(actions)
+        next_state, rewards, dones, exec_act = env.step(actions)
         
         assert next_state.shape == (2, env.state_dim)
         assert rewards.shape == (2,)
@@ -64,7 +64,7 @@ class TestBatchedFTMOEnv:
         
         while not dones.all() and step_count < max_steps:
             actions = torch.randint(0, NUM_ACTIONS, (2,), device=device)
-            state, _, dones = env.step(actions)
+            state, _, dones, _exec = env.step(actions)
             step_count += 1
         
         assert dones.all(), "Episode did not complete within expected steps"
