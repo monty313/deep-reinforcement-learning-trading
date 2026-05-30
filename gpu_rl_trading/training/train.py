@@ -19,7 +19,7 @@ import torch
 
 from gpu_rl_trading.config.settings import CFG
 from gpu_rl_trading.env.indicators import build_feature_matrix
-from gpu_rl_trading.env.environment import BatchedFTMOEnv
+from gpu_rl_trading.env.environment import BatchedFTMOEnv, NUM_ACTIONS
 from gpu_rl_trading.agent.dqn import DQNAgent
 
 
@@ -83,7 +83,7 @@ def run_training(cfg: dict = None, resume: bool = False) -> DQNAgent:
     cfg["STATE_DIM"] = env.state_dim
     print(f"[env] state_dim={env.state_dim}  batch={cfg['BATCH_SIZE_ENV']}", flush=True)
 
-    agent = DQNAgent(env.state_dim, env.NUM_ACTIONS, cfg, device)
+    agent = DQNAgent(env.state_dim, NUM_ACTIONS, cfg, device)
 
     ckpt_dir = Path(cfg["CHECKPOINT_DIR"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
