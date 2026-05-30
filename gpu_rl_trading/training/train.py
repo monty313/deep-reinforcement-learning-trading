@@ -161,17 +161,17 @@ class EpisodeRewardShaper:
 # ── single phase training loop ────────────────────────────────────────────────
 
 def run_phase(
-    phase:       int,
-    env:         BatchedFTMOEnv,
-    agent:       DQNAgent,
-    cfg:         dict,
-    ckpt_dir:    Path,
-    metrics_dir: Path,
-    shaper:      EpisodeRewardShaper,
-    all_daily:   list,
-    all_ep_rows: list,
-    global_ep:   int,
-    resume_ep:   int = 0,
+    phase:          int,
+    env:            BatchedFTMOEnv,
+    agent:          DQNAgent,
+    cfg:            dict,
+    ckpt_dir:       Path,
+    metrics_dir:    Path,
+    shaper:         EpisodeRewardShaper,
+    all_daily:      list,
+    all_ep_rows:    list,
+    global_ep:      int,
+    resume_consec:  list = None,   # restored consec_pass from checkpoint
 ) -> tuple:
     """
     Run one curriculum phase.
@@ -187,9 +187,14 @@ def run_phase(
     device         = agent.device
 
     # per-batch consecutive PASS day counter
-    consec_pass    = [0] * B
-    best_consec    = 0
-    ep_in_phase    = 0
+    # restore from checkpoint if available so phase advancement progress is preserved
+    consec_pass = resume_consec if resume_consec and len(resume_consec) == B else [0] * B
+    best_consec = max(consec_pass)
+    ep_in_phase = 0
+
+    if resume_consec:
+        print(f"  [resume] consec_pass restored: {consec_pass}  best={best_consec}",
+              flush=True)
 
     print(f"\n{'='*60}", flush=True)
     print(f"  [PHASE {phase}] Starting  (advance at {ADVANCE_DAYS} consec PASS days)", flush=True)
@@ -278,10 +283,13 @@ def run_phase(
             "steps":        step,
         })
 
-        # checkpoint
+        # checkpoint — save phase + consec_pass so resume is seamless
         if ep_in_phase % CKPT_EVERY == 0:
             ck_path = ckpt_dir / f"eurusd_gpu_ph{phase}_ep{global_ep:04d}.pt"
-            agent.save(str(ck_path))
+            agent.save(str(ck_path), extra={
+                "phase":       phase,
+                "consec_pass": consec_pass,
+            })
 
         # flush CSVs every 20 episodes
         if ep_in_phase % 20 == 0:
@@ -291,11 +299,13 @@ def run_phase(
         if best_consec >= ADVANCE_DAYS:
             print(f"\n[PHASE {phase}] ✓ {ADVANCE_DAYS} consecutive PASS days — advancing!",
                   flush=True)
-            agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"))
+            agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"),
+                       extra={"phase": phase, "consec_pass": consec_pass})
             return global_ep, True, best_consec
 
     print(f"\n[PHASE {phase}] Max episodes ({MAX_EP_PHASE}) reached — advancing.", flush=True)
-    agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"))
+    agent.save(str(ckpt_dir / f"eurusd_gpu_ph{phase}_final.pt"),
+               extra={"phase": phase, "consec_pass": consec_pass})
     return global_ep, False, best_consec
 
 
@@ -358,21 +368,51 @@ def run_training(
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 3. Optional resume ────────────────────────────────────────────────────
-    resume_ep = 0
+    resume_ep         = 0
+    resume_phase      = start_phase
+    resume_consec     = None   # restored per-batch consec_pass list
+
     if resume:
-        ck = latest_checkpoint(ckpt_dir)
+        # Find latest checkpoint matching start_phase first, then fall back to any
+        ck = latest_checkpoint(ckpt_dir, phase=start_phase)
+        if ck is None:
+            ck = latest_checkpoint(ckpt_dir)   # fallback: any phase
+
         if ck:
             ckpt_meta      = torch.load(str(ck), map_location="cpu")
             ckpt_state_dim = ckpt_meta.get("state_dim", env.state_dim)
+            ckpt_phase     = ckpt_meta.get("phase", start_phase)
             use_partial    = (ckpt_state_dim != env.state_dim)
+
+            if ckpt_phase != start_phase:
+                print(f"[resume] WARNING: checkpoint is phase {ckpt_phase} "
+                      f"but start_phase={start_phase} — loading anyway", flush=True)
+
             if use_partial:
                 print(f"[resume] state_dim {ckpt_state_dim}→{env.state_dim} "
                       f"— transfer learning", flush=True)
-            agent.load(str(ck), partial=use_partial)
-            try:
-                resume_ep = int(ck.stem.split("_ep")[-1])
-            except Exception:
-                pass
+
+            ckpt_returned = agent.load(str(ck), partial=use_partial)
+
+            # extract episode number from filename — loud failure if pattern broken
+            stem = ck.stem
+            if "_ep" in stem:
+                try:
+                    resume_ep = int(stem.split("_ep")[-1])
+                except ValueError as e:
+                    print(f"[resume] WARNING: could not parse episode from '{stem}': {e}"
+                          f" — resuming from ep 0", flush=True)
+            else:
+                print(f"[resume] WARNING: no '_ep' in filename '{stem}' "
+                      f"— resuming from ep 0", flush=True)
+
+            # restore consec_pass if saved
+            resume_consec = ckpt_returned.get("consec_pass", None)
+            if resume_consec:
+                print(f"[resume] consec_pass restored: {resume_consec}", flush=True)
+
+            print(f"[resume] Resuming from episode {resume_ep}  phase {ckpt_phase}",
+                  flush=True)
         else:
             print("[resume] No checkpoint found — starting fresh.", flush=True)
 
@@ -388,19 +428,22 @@ def run_training(
           f"or {cfg.get('MAX_EPISODES_PER_PHASE', 500)} episodes per phase\n", flush=True)
 
     for phase in phases:
+        # only pass resume_consec on the first phase (subsequent phases start fresh)
+        phase_consec = resume_consec if phase == resume_phase else None
         global_ep, advanced, best_consec = run_phase(
-            phase       = phase,
-            env         = env,
-            agent       = agent,
-            cfg         = cfg,
-            ckpt_dir    = ckpt_dir,
-            metrics_dir = metrics_dir,
-            shaper      = shaper,
-            all_daily   = all_daily,
-            all_ep_rows = all_ep_rows,
-            global_ep   = global_ep,
-            resume_ep   = resume_ep,
+            phase          = phase,
+            env            = env,
+            agent          = agent,
+            cfg            = cfg,
+            ckpt_dir       = ckpt_dir,
+            metrics_dir    = metrics_dir,
+            shaper         = shaper,
+            all_daily      = all_daily,
+            all_ep_rows    = all_ep_rows,
+            global_ep      = global_ep,
+            resume_consec  = phase_consec,
         )
+        resume_consec = None   # only used on first phase
         _flush_csvs(all_daily, all_ep_rows, metrics_dir)
         reason = "consecutive PASS days" if advanced else "episode cap"
         print(f"\n[train] Phase {phase} complete ({reason})  "

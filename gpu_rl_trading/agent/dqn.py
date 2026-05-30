@@ -145,27 +145,42 @@ class DQNAgent:
             self.cfg["EPSILON_START"] * (ratio ** (episode / decay_episodes))
         )
 
-    def save(self, path: str):
-        """Save checkpoint. Always stores state_dim so partial loads work."""
-        torch.save({
+    def save(self, path: str, extra: dict = None):
+        """
+        Save checkpoint. Stores state_dim (transfer learning) and replay buffer.
+        extra: optional dict of additional keys to store (e.g. phase, consec_pass).
+        """
+        payload = {
             "q_net":      self.q_net.state_dict(),
             "target":     self.target_net.state_dict(),
             "optimizer":  self.optimizer.state_dict(),
             "epsilon":    self.epsilon,
             "step":       self._step_count,
-            "state_dim":  self.state_dim,    # ← stored for transfer learning
-        }, path)
-        print(f"[ckpt] saved -> {path}", flush=True)
+            "state_dim":  self.state_dim,
+            # replay buffer — stored as CPU tensors to survive device changes
+            "replay_states":      self.memory.states[:self.memory.size].cpu(),
+            "replay_next_states": self.memory.next_states[:self.memory.size].cpu(),
+            "replay_actions":     self.memory.actions[:self.memory.size].cpu(),
+            "replay_rewards":     self.memory.rewards[:self.memory.size].cpu(),
+            "replay_dones":       self.memory.dones[:self.memory.size].cpu(),
+            "replay_size":        self.memory.size,
+            "replay_ptr":         self.memory.ptr,
+        }
+        if extra:
+            payload.update(extra)
+        torch.save(payload, path)
+        print(f"[ckpt] saved -> {path}  (replay={self.memory.size} transitions)",
+              flush=True)
 
-    def load(self, path: str, partial: bool = False):
+    def load(self, path: str, partial: bool = False) -> dict:
         """
-        Load checkpoint.
+        Load checkpoint. Restores weights, optimizer, epsilon, step count,
+        and replay buffer. Returns the raw checkpoint dict so callers can
+        retrieve extra keys (e.g. phase, consec_pass).
 
         Args:
             path    : path to .pt file
             partial : if True, use transfer learning when state_dim differs.
-                      Old feature weights are preserved; new columns zero-init.
-                      If False (default), standard exact load — raises on mismatch.
         """
         ckpt = torch.load(path, map_location=self.device)
         ckpt_state_dim = ckpt.get("state_dim", self.state_dim)
@@ -175,7 +190,6 @@ class DQNAgent:
                   f"(+{self.state_dim - ckpt_state_dim} features)", flush=True)
             self.q_net.load_partial(ckpt["q_net"], ckpt_state_dim)
             self.target_net.load_partial(ckpt["target"], ckpt_state_dim)
-            # rebuild optimizer for the new network parameters
             self.optimizer = torch.optim.Adam(
                 self.q_net.parameters(), lr=self.cfg["LR"])
             print("[transfer] optimizer reset for new architecture", flush=True)
@@ -187,5 +201,23 @@ class DQNAgent:
         self.epsilon     = ckpt.get("epsilon", self.cfg["EPSILON_START"])
         self._step_count = ckpt.get("step", 0)
 
-        mode = "partial/transfer" if (partial and ckpt_state_dim != self.state_dim) else "exact"
+        # restore replay buffer if present
+        if "replay_states" in ckpt:
+            size = ckpt["replay_size"]
+            ptr  = ckpt["replay_ptr"]
+            self.memory.states[:size]      = ckpt["replay_states"].to(self.device)
+            self.memory.next_states[:size] = ckpt["replay_next_states"].to(self.device)
+            self.memory.actions[:size]     = ckpt["replay_actions"].to(self.device)
+            self.memory.rewards[:size]     = ckpt["replay_rewards"].to(self.device)
+            self.memory.dones[:size]       = ckpt["replay_dones"].to(self.device)
+            self.memory.size               = size
+            self.memory.ptr                = ptr
+            print(f"[ckpt] replay buffer restored ({size} transitions)", flush=True)
+        else:
+            print("[ckpt] no replay buffer in checkpoint — starting fresh buffer",
+                  flush=True)
+
+        mode = "partial/transfer" if (partial and ckpt_state_dim != self.state_dim) \
+               else "exact"
         print(f"[ckpt] loaded ({mode}) <- {path}", flush=True)
+        return ckpt
