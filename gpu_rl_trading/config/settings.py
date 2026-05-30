@@ -42,6 +42,15 @@ CFG = {
     "NUM_EPISODES":           200,    # legacy fallback (ignored in full curriculum)
     "CHECKPOINT_EVERY": 10,
 
+    # ── Potential-based reward shaping (Φ) ───────────────────────────────────
+    # Φ = (pass_rate × avg_ret_normalised) / (1 + λ × avg_dd_normalised)
+    # Normalised to configured targets so these values never need retuning
+    # when DAILY_TARGET_PCT or DAILY_MAX_DD_PCT change.
+    "SHAPE_ALPHA":   0.01,   # gain — shaping stays ≤1% of typical reward magnitude
+    "SHAPE_CLIP":    0.03,   # max shaping per step (≈10% of base PASS reward 0.025 + 0.005 OK)
+    "SHAPE_LAMBDA":  5.0,    # dd penalty weight (dd at limit cuts Φ in half)
+    "SHAPE_WARMUP":  50,     # episodes before shaping activates
+
     # Paths (relative to gpu_rl_trading/)
     "CHECKPOINT_DIR":  str(ROOT / "checkpoints"),
     "METRICS_DIR":     str(ROOT / "metrics"),

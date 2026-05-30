@@ -56,37 +56,62 @@ def latest_checkpoint(ckpt_dir: Path, phase: int = None) -> Path | None:
     return files[-1] if files else None
 
 
-# ── per-episode reward shaping tracker ───────────────────────────────────────
+# ── Episode-level potential-based reward shaper ───────────────────────────────
 
 class EpisodeRewardShaper:
     """
-    Tracks cross-episode statistics and computes bonus rewards at episode end.
+    Computes a single episode-end bonus using the same Φ potential function
+    used inside the environment for day-level shaping.
 
-    Bonuses (all normalised to ~equity scale):
-      - Consecutive PASS days streak (grows with streak length)
-      - Lower dd than previous episode avg
-      - Higher return than previous episode avg
-      - PASS rate all-time high
-      - 5-episode consistency window (PASS rate ≥ threshold → growing bonus)
-      - Each additional consecutive consistent episode multiplies the bonus
+    Φ_episode = (pass_rate × avg_ret_normalised) / (1 + λ × avg_dd_normalised)
+
+    The bonus is the change in Φ relative to a smoothed rolling average of
+    recent episodes, normalised by the running std-dev.  This is the
+    potential-based form:  bonus = clip(α × (Φ_ep - Φ_smooth) / σ_Φ, -c, +c)
+
+    Because Φ is normalised to configured targets (not raw percentages), the
+    same α and clip values work for any daily_target_pct / max_dd_pct combination
+    — fully supporting parameterizable targets without retuning.
     """
 
-    def __init__(self):
-        self.ep_pass_rates:    List[float] = []
-        self.ep_fail_counts:   List[int]   = []
-        self.ep_pass_counts:   List[int]   = []
-        self.ep_avg_rets:      List[float] = []
-        self.ep_avg_dds:       List[float] = []
-        self.ath_pass_rate:    float       = 0.0
-        self.consistency_streak: int       = 0
+    def __init__(self, cfg: dict):
+        self.target_pct  = float(cfg["DAILY_TARGET_PCT"])
+        self.max_dd_pct  = float(cfg["DAILY_MAX_DD_PCT"])
+        self.alpha       = float(cfg.get("SHAPE_ALPHA",  0.01))
+        self.clip_val    = float(cfg.get("SHAPE_CLIP",   0.03))
+        self.lam         = float(cfg.get("SHAPE_LAMBDA", 5.0))
+        self.warmup      = int(  cfg.get("SHAPE_WARMUP", 50))
+        self.window      = 20   # smoothing window for Φ history
 
-    def compute_bonus(
-        self,
-        daily_log:         list,   # env.daily_metrics_log for this episode
-        consec_pass_days:  int,    # longest consecutive PASS streak this episode
-    ) -> float:
-        """Return scalar bonus reward for this episode."""
-        if not daily_log:
+        self._phi_history:  List[float] = []   # recent Φ values for smoothing
+        self._ath_phi:      float       = 0.0  # all-time high Φ
+        self.global_ep:     int         = 0    # set by trainer each episode
+
+    def _phi(self, pass_rate: float, avg_ret: float, avg_dd: float) -> float:
+        """
+        Compute Φ normalised to configured target/risk.
+        Φ = 1.0 means hitting the target exactly every day with no dd.
+        Φ scales correctly for any target_pct / max_dd_pct combination.
+        """
+        ret_norm = avg_ret / (self.target_pct * 100.0 + 1e-8)
+        dd_norm  = avg_dd  / (self.max_dd_pct  * 100.0 + 1e-8)
+        return (pass_rate * max(ret_norm, 0.0)) / (1.0 + self.lam * dd_norm)
+
+    def compute_bonus(self, daily_log: list, consec_pass_days: int) -> float:
+        """
+        Return scalar episode-end bonus reward (added to replay as terminal signal).
+        Returns 0.0 during warm-up.
+        """
+        if not daily_log or self.global_ep < self.warmup:
+            # still in warm-up — record history but no bonus yet
+            if daily_log:
+                flags  = [r["ftmo_flag"]              for r in daily_log]
+                rets   = [r["daily_return_pct"]       for r in daily_log]
+                dds    = [r["daily_max_drawdown_pct"] for r in daily_log]
+                n      = len(flags)
+                phi_ep = self._phi(flags.count("PASS") / n,
+                                   sum(rets) / n, sum(dds) / n)
+                self._phi_history.append(phi_ep)
             return 0.0
 
         flags     = [r["ftmo_flag"]              for r in daily_log]
@@ -94,71 +119,41 @@ class EpisodeRewardShaper:
         dds       = [r["daily_max_drawdown_pct"] for r in daily_log]
         n         = len(flags)
         passes    = flags.count("PASS")
-        fails     = flags.count("FAIL")
-        pass_rate = passes / n if n > 0 else 0.0
+        pass_rate = passes / n
         avg_ret   = sum(rets) / n
         avg_dd    = sum(dds)  / n
 
-        bonus = 0.0
+        phi_ep = self._phi(pass_rate, avg_ret, avg_dd)
 
-        # ── 1. Consecutive PASS day streak ────────────────────────────────────
-        if consec_pass_days >= 2:
-            bonus += (consec_pass_days ** 1.5) * 0.01
+        # smoothed baseline = mean of recent Φ history
+        phi_smooth = float(np.mean(self._phi_history[-self.window:])) \
+                     if self._phi_history else 0.0
+        sigma      = float(np.std( self._phi_history[-self.window:])) \
+                     if len(self._phi_history) > 1 else 1.0
+        sigma      = max(sigma, 1e-4)
 
-        # ── 2. Better avg return than last episode ────────────────────────────
-        if self.ep_avg_rets and avg_ret > self.ep_avg_rets[-1]:
-            improvement = avg_ret - self.ep_avg_rets[-1]
-            bonus += min(improvement * 0.05, 0.05)
+        # potential-based shaping: reward progress, penalise regression
+        delta   = phi_ep - phi_smooth
+        bonus   = float(np.clip(self.alpha * delta / sigma,
+                                -self.clip_val, self.clip_val))
 
-        # ── 3. Lower avg dd than last episode ────────────────────────────────
-        if self.ep_avg_dds and avg_dd < self.ep_avg_dds[-1]:
-            improvement = self.ep_avg_dds[-1] - avg_dd
-            bonus += min(improvement * 0.05, 0.05)
-
-        # ── 4. PASS rate all-time high ────────────────────────────────────────
-        if pass_rate > self.ath_pass_rate:
-            bonus += 0.10
-            self.ath_pass_rate = pass_rate
-            print(f"  [★ ATH pass rate] {pass_rate:.1%}", flush=True)
-
-        # ── 5. More PASSes than last episode ─────────────────────────────────
-        if self.ep_pass_counts and passes > self.ep_pass_counts[-1]:
-            extra = passes - self.ep_pass_counts[-1]
-            bonus += extra * 0.015
-            print(f"  [★ +{extra} PASS days vs last ep]  bonus={extra*0.015:.3f}",
+        # ATH Φ milestone — one-time bonus for reaching a new best
+        if phi_ep > self._ath_phi:
+            ath_bonus      = min((phi_ep - self._ath_phi) * 0.10, 0.05)
+            bonus         += ath_bonus
+            self._ath_phi  = phi_ep
+            print(f"  [★ ATH Φ={phi_ep:.4f}]  pass={pass_rate:.1%}  "
+                  f"ret={avg_ret:+.2f}%  dd={avg_dd:.2f}%  bonus={ath_bonus:.4f}",
                   flush=True)
 
-        # ── 6. More FAILs than last episode — big penalty ─────────────────────
-        if self.ep_fail_counts and fails > self.ep_fail_counts[-1]:
-            extra = fails - self.ep_fail_counts[-1]
-            penalty = extra * 0.030   # 2x the pass bonus — asymmetric
-            bonus  -= penalty
-            print(f"  [✗ +{extra} FAIL days vs last ep]  penalty=-{penalty:.3f}",
-                  flush=True)
+        self._phi_history.append(phi_ep)
+        if len(self._phi_history) > 100:
+            self._phi_history.pop(0)
 
-        # ── 7. Win-rate improvement over 3-ep rolling avg ────────────────────
-        if len(self.ep_pass_rates) >= 3:
-            prev_avg = sum(self.ep_pass_rates[-3:]) / 3
-            if pass_rate > prev_avg:
-                bonus += (pass_rate - prev_avg) * 0.20
-
-        # ── 8. Consistency streak (≥50% pass rate) ───────────────────────────
-        if pass_rate >= 0.50:
-            self.consistency_streak += 1
-            consistency_bonus = 0.05 * self.consistency_streak
-            bonus += consistency_bonus
-            if self.consistency_streak >= 5:
-                print(f"  [★ consistency] {self.consistency_streak} eps "
-                      f"≥50% pass  bonus={consistency_bonus:.3f}", flush=True)
-        else:
-            self.consistency_streak = 0
-
-        # ── record for next episode ───────────────────────────────────────────
-        self.ep_pass_rates.append(pass_rate)
-        self.ep_pass_counts.append(passes)
-        self.ep_fail_counts.append(fails)
-        self.ep_avg_rets.append(avg_ret)
-        self.ep_avg_dds.append(avg_dd)
+        if bonus != 0.0:
+            print(f"  [Φ shaping] ep={self.global_ep}  "
+                  f"Φ={phi_ep:.4f}  smooth={phi_smooth:.4f}  "
+                  f"bonus={bonus:+.4f}", flush=True)
 
         return bonus
 
@@ -205,6 +200,7 @@ def run_phase(
 
     while ep_in_phase < MAX_EP_PHASE:
         t_ep      = time.perf_counter()
+        env.start_episode(global_ep)
         state     = env.reset()
         ep_reward = torch.zeros(B, device=device)
         dones     = torch.zeros(B, dtype=torch.bool, device=device)
@@ -243,17 +239,20 @@ def run_phase(
 
         best_consec = max(best_consec, ep_best_consec)
 
-        # ── episode-level reward shaping bonus ────────────────────────────────
+        # ── episode-level Φ shaping bonus ─────────────────────────────────────
+        shaper.global_ep = global_ep
         ep_bonus = shaper.compute_bonus(env.daily_metrics_log, ep_best_consec)
-        if ep_bonus > 0:
-            # inject bonus into replay buffer as a terminal reward signal
-            dummy = torch.zeros(1, env.state_dim, device=device)
+        if ep_bonus != 0.0:
+            # Add to the last real terminal transition in the replay buffer
+            # by storing a proper (s, a, r=bonus, s', done=True) tuple using
+            # the final state the episode ended on — not a dummy zero state.
+            final_state = state   # state after last env.step()
             agent.memory.push(
-                dummy,
-                torch.zeros(1, dtype=torch.long, device=device),
-                torch.tensor([ep_bonus], device=device),
-                dummy,
-                torch.ones(1, dtype=torch.bool, device=device),
+                final_state,
+                torch.zeros(B, dtype=torch.long, device=device),
+                torch.full((B,), ep_bonus, device=device),
+                final_state,
+                torch.ones(B, dtype=torch.bool, device=device),
             )
 
         agent.decay_epsilon(global_ep)
@@ -380,7 +379,7 @@ def run_training(
     # ── 4. Full curriculum loop ───────────────────────────────────────────────
     all_daily:   list = []
     all_ep_rows: list = []
-    shaper            = EpisodeRewardShaper()
+    shaper            = EpisodeRewardShaper(cfg)
     global_ep         = resume_ep
 
     phases = list(range(start_phase, 8))

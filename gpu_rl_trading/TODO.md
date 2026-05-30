@@ -20,6 +20,8 @@
 
 ## Completed
 
+- [x] **Potential-based reward shaping (Φ)** — replaced 10 ad-hoc reward signals with single Φ = (pass_rate × avg_ret_norm) / (1 + λ × avg_dd_norm), normalised to configured targets so shaping generalizes across any target/risk combination without retuning. Warm-up gate (50 eps), normalized by running σ, clipped to ±0.03. Primary PASS/OK/FAIL rewards unchanged and dominant.
+
 - [x] **Transfer learning compatibility** — checkpoints store `state_dim`; `load(partial=True)` preserves old feature weights and zero-inits new columns; `train.py` auto-detects when partial load is needed on resume
 
 - [x] Dynamic lot sizing based on ATR and FTMO gap

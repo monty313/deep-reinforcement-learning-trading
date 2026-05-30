@@ -125,12 +125,25 @@ class BatchedFTMOEnv:
         self._prev_day     = torch.full((self.B,), -1, dtype=torch.long, device=device)
         self._active       = torch.ones(self.B, dtype=torch.bool, device=device)
 
-        # per-batch intra-episode reward shaping trackers
-        self._consec_pass  = [0]   * self.B   # consecutive PASS days this episode
-        self._prev_ret     = [0.0] * self.B   # previous day's return pct
-        self._prev_dd      = [1.0] * self.B   # previous day's dd pct
-        self._running_avg_ret = [0.0] * self.B  # rolling avg daily return this episode
-        self._days_seen    = [0]   * self.B   # days seen this episode (for avg)
+        # ── Potential-based reward shaping (Φ) ───────────────────────────────
+        # Φ = (pass_rate × avg_return) / (1 + λ × avg_drawdown)
+        # Generalizes to any target/risk: pass_rate and avg_return are expressed
+        # as multiples of the configured target, so Φ=1.0 means "exactly on target".
+        # This makes the shaping signal identical in scale regardless of whether
+        # the daily target is 2.5% or 5% or any other value.
+        self._shape_alpha   = float(cfg.get("SHAPE_ALPHA",   0.01))  # gain
+        self._shape_clip    = float(cfg.get("SHAPE_CLIP",    0.03))  # max magnitude
+        self._shape_lambda  = float(cfg.get("SHAPE_LAMBDA",  5.0))   # dd penalty weight
+        self._shape_warmup  = int(  cfg.get("SHAPE_WARMUP",  50))    # episodes before shaping on
+
+        # per-batch Φ trackers (reset each episode)
+        self._phi_prev      = [0.0] * self.B   # Φ at end of previous day
+        self._phi_history   = [[] for _ in range(self.B)]  # rolling window for σ
+        self._days_seen     = [0]  * self.B
+        self._ep_pass_count = [0]  * self.B
+        self._ep_ret_sum    = [0.0]* self.B
+        self._ep_dd_sum     = [0.0]* self.B
+        self._episode_count = 0    # incremented by trainer via env.start_episode()
 
         self.daily_metrics_log: List[dict] = []
         self.state_dim = self._compute_state_dim()
@@ -164,14 +177,18 @@ class BatchedFTMOEnv:
         self._entry_px     = torch.zeros(self.B, device=self.device)
         self._lots         = torch.zeros(self.B, device=self.device)
         self._prev_day     = torch.full((self.B,), -1, dtype=torch.long, device=self.device)
-        self._active          = torch.ones(self.B, dtype=torch.bool, device=self.device)
-        self._consec_pass     = [0]   * self.B
-        self._prev_ret        = [0.0] * self.B
-        self._prev_dd         = [1.0] * self.B
-        self._running_avg_ret = [0.0] * self.B
-        self._days_seen       = [0]   * self.B
+        self._active        = torch.ones(self.B, dtype=torch.bool, device=self.device)
+        self._phi_prev      = [0.0] * self.B
+        self._days_seen     = [0]   * self.B
+        self._ep_pass_count = [0]   * self.B
+        self._ep_ret_sum    = [0.0] * self.B
+        self._ep_dd_sum     = [0.0] * self.B
         self.daily_metrics_log = []
         return self._get_state()
+
+    def start_episode(self, global_episode: int):
+        """Call from trainer at start of each episode to track warm-up."""
+        self._episode_count = global_episode
 
     # ── state ─────────────────────────────────────────────────────────────────
     def _get_state(self) -> torch.Tensor:
@@ -333,6 +350,57 @@ class BatchedFTMOEnv:
 
         return new_actions
 
+    # ── potential function Φ ─────────────────────────────────────────────────
+    def _compute_phi(self, b: int) -> float:
+        """
+        Φ(b) = (pass_rate × avg_return_normalised) / (1 + λ × avg_dd_normalised)
+
+        Normalisation makes Φ target/risk agnostic:
+          - avg_return is expressed as a multiple of daily_target_pct
+            so Φ = 1.0 means "hitting the target exactly every day"
+          - avg_dd is expressed as a multiple of max_dd_pct
+            so the λ penalty is proportional to how far over the limit we are
+
+        This means the same α and clip values work whether the target is 2.5% or 5%,
+        supporting parameterizable targets without retuning the shaping hyperparams.
+        """
+        n = self._days_seen[b]
+        if n == 0:
+            return 0.0
+        pass_rate  = self._ep_pass_count[b] / n
+        avg_ret    = self._ep_ret_sum[b]    / n
+        avg_dd     = self._ep_dd_sum[b]     / n
+
+        # normalise to configured target and risk — makes Φ scale-invariant
+        ret_norm = avg_ret / (self.target_pct * 100.0 + 1e-8)   # 1.0 = on target
+        dd_norm  = avg_dd  / (self.max_dd_pct  * 100.0 + 1e-8)  # 1.0 = at limit
+
+        phi = (pass_rate * max(ret_norm, 0.0)) / (1.0 + self._shape_lambda * dd_norm)
+        return float(phi)
+
+    def _shape_reward(self, b: int, phi_now: float) -> float:
+        """
+        Compute shaping term: clip(α × (Φ_now - Φ_prev) / σ_Φ, -clip, +clip).
+        Returns 0.0 during warm-up.
+        """
+        if self._episode_count < self._shape_warmup:
+            self._phi_prev[b] = phi_now
+            return 0.0
+
+        delta = phi_now - self._phi_prev[b]
+        history = self._phi_history[b]
+        history.append(phi_now)
+        if len(history) > 20:
+            history.pop(0)
+
+        sigma = float(np.std(history)) if len(history) > 1 else 1.0
+        sigma = max(sigma, 1e-4)
+
+        shaping = self._shape_alpha * delta / sigma
+        shaping = float(np.clip(shaping, -self._shape_clip, self._shape_clip))
+        self._phi_prev[b] = phi_now
+        return shaping
+
     # ── dynamic lot sizing ────────────────────────────────────────────────────
     def _dynamic_lots(self, actions: torch.Tensor, curr_close: torch.Tensor) -> torch.Tensor:
         """
@@ -464,14 +532,13 @@ class BatchedFTMOEnv:
         self._day_high_eq = torch.maximum(self._day_high_eq, self._equity.detach())
         self._prev_day    = torch.where(self._active, day_idx, self._prev_day)
 
-        # ── FTMO drawdown breach penalty ──────────────────────────────────────
+        # ── FTMO intraday drawdown breach penalty ────────────────────────────
         dd_now    = (self._day_high_eq - self._equity) / (self._day_high_eq + 1e-8)
         fail_mask = self._active & (dd_now > self.max_dd_pct)
         rewards   = torch.where(fail_mask, rewards - 0.02, rewards)
 
-        # ── day-boundary reward shaping ───────────────────────────────────────
+        # ── day-boundary: base FTMO rewards + Φ-based progress shaping ───────
         if new_day.any():
-            # find the most recent log entry per batch
             batch_latest = {}
             for row in reversed(self.daily_metrics_log):
                 b = row["batch"]
@@ -489,57 +556,29 @@ class BatchedFTMOEnv:
                 ret_pct = row["daily_return_pct"]
                 dd_pct  = row["daily_max_drawdown_pct"]
 
-                # 1. Base PASS / OK reward
+                # ── Primary FTMO reward (dominant signal, never touched) ──────
                 if flag == "PASS":
                     rewards[b] = rewards[b] + 0.025
                 elif flag == "OK":
                     rewards[b] = rewards[b] + 0.005
                 else:
-                    rewards[b] = rewards[b] - 0.010   # FAIL penalty
+                    rewards[b] = rewards[b] - 0.010
 
-                # 2. Consecutive PASS day streak — grows non-linearly
+                # ── Update episode accumulators for Φ ─────────────────────────
+                self._days_seen[b]     += 1
+                self._ep_ret_sum[b]    += ret_pct
+                self._ep_dd_sum[b]     += dd_pct
                 if flag == "PASS":
-                    self._consec_pass[b] += 1
-                    streak = self._consec_pass[b]
-                    streak_bonus = (streak ** 1.5) * 0.005
-                    rewards[b] = rewards[b] + streak_bonus
-                else:
-                    self._consec_pass[b] = 0
+                    self._ep_pass_count[b] += 1
 
-                # 3. Return improving day over day
-                if ret_pct > self._prev_ret[b] and ret_pct > 0:
-                    rewards[b] = rewards[b] + 0.005
-
-                # 4. DD decreasing day over day
-                if dd_pct < self._prev_dd[b] and flag != "FAIL":
-                    rewards[b] = rewards[b] + 0.005
-
-                # 5. Clean PASS — reward tighter dd
-                if flag == "PASS":
-                    dd_margin = max(0.0, 1.0 - dd_pct)
-                    rewards[b] = rewards[b] + dd_margin * 0.010
-
-                # 6. Avg return tracking — reward days above running avg,
-                #    penalise days that drag the average down
-                self._days_seen[b] += 1
-                n = self._days_seen[b]
-                old_avg = self._running_avg_ret[b]
-                new_avg = old_avg + (ret_pct - old_avg) / n   # incremental mean
-                self._running_avg_ret[b] = new_avg
-
-                if n > 1:  # need at least 2 days to compare
-                    if ret_pct > old_avg:
-                        # this day raised the average — reward proportionally
-                        improvement = (ret_pct - old_avg) / (abs(old_avg) + 1e-4)
-                        rewards[b] = rewards[b] + min(improvement * 0.010, 0.020)
-                    elif ret_pct < old_avg:
-                        # this day dragged the average down — penalise
-                        drag = (old_avg - ret_pct) / (abs(old_avg) + 1e-4)
-                        rewards[b] = rewards[b] - min(drag * 0.008, 0.015)
-
-                # update trackers
-                self._prev_ret[b] = ret_pct
-                self._prev_dd[b]  = dd_pct
+                # ── Potential-based progress shaping ──────────────────────────
+                # Φ captures all progressive goals in one normalised score:
+                #   pass_rate, avg_return, avg_dd — all relative to configured
+                #   targets so the signal scales correctly with any target/risk.
+                phi_now = self._compute_phi(b)
+                shaping = self._shape_reward(b, phi_now)
+                if shaping != 0.0:
+                    rewards[b] = rewards[b] + shaping
 
         # ── zero out inactive episodes ────────────────────────────────────────
         rewards = torch.where(self._active, rewards, torch.zeros_like(rewards))
