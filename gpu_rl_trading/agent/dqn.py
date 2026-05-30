@@ -203,16 +203,30 @@ class DQNAgent:
 
         # restore replay buffer if present
         if "replay_states" in ckpt:
-            size = ckpt["replay_size"]
-            ptr  = ckpt["replay_ptr"]
-            self.memory.states[:size]      = ckpt["replay_states"].to(self.device)
-            self.memory.next_states[:size] = ckpt["replay_next_states"].to(self.device)
-            self.memory.actions[:size]     = ckpt["replay_actions"].to(self.device)
-            self.memory.rewards[:size]     = ckpt["replay_rewards"].to(self.device)
-            self.memory.dones[:size]       = ckpt["replay_dones"].to(self.device)
-            self.memory.size               = size
-            self.memory.ptr                = ptr
-            print(f"[ckpt] replay buffer restored ({size} transitions)", flush=True)
+            size      = ckpt["replay_size"]
+            ptr       = ckpt["replay_ptr"]
+            ckpt_sdim = ckpt["replay_states"].shape[1]
+
+            if size > self.memory.capacity:
+                # checkpoint has more transitions than new buffer — truncate to capacity
+                print(f"[ckpt] replay: saved size {size} > capacity {self.memory.capacity}"
+                      f" — truncating to {self.memory.capacity}", flush=True)
+                size = self.memory.capacity
+                ptr  = 0   # reset pointer since we truncated
+
+            if ckpt_sdim != self.state_dim:
+                # state_dim changed — replay buffer is incompatible, start fresh
+                print(f"[ckpt] replay: state_dim mismatch ({ckpt_sdim} vs {self.state_dim})"
+                      f" — starting fresh buffer (weights still loaded)", flush=True)
+            else:
+                self.memory.states[:size]      = ckpt["replay_states"][:size].to(self.device)
+                self.memory.next_states[:size] = ckpt["replay_next_states"][:size].to(self.device)
+                self.memory.actions[:size]     = ckpt["replay_actions"][:size].to(self.device)
+                self.memory.rewards[:size]     = ckpt["replay_rewards"][:size].to(self.device)
+                self.memory.dones[:size]       = ckpt["replay_dones"][:size].to(self.device)
+                self.memory.size               = size
+                self.memory.ptr                = ptr % self.memory.capacity
+                print(f"[ckpt] replay buffer restored ({size} transitions)", flush=True)
         else:
             print("[ckpt] no replay buffer in checkpoint — starting fresh buffer",
                   flush=True)

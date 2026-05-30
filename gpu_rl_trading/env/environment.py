@@ -182,7 +182,13 @@ class BatchedFTMOEnv:
         self._lots         = torch.zeros(self.B, device=self.device)
         self._prev_day     = torch.full((self.B,), -1, dtype=torch.long, device=self.device)
         self._active        = torch.ones(self.B, dtype=torch.bool, device=self.device)
-        self._phi_prev      = [0.0] * self.B
+        # initialise _phi_prev to the current rolling average so the first day
+        # of each episode doesn't get an artificial positive bonus from comparing
+        # against 0. If no history yet, 0.0 is the correct neutral baseline.
+        self._phi_prev      = [
+            float(np.mean(self._phi_history[b][-20:])) if self._phi_history[b] else 0.0
+            for b in range(self.B)
+        ]
         self._days_seen     = [0]   * self.B
         self._ep_pass_count = [0]   * self.B
         self._ep_ret_sum    = [0.0] * self.B
@@ -193,6 +199,15 @@ class BatchedFTMOEnv:
     def start_episode(self, global_episode: int):
         """Call from trainer at start of each episode to track warm-up."""
         self._episode_count = global_episode
+
+    def reset_phi_history(self):
+        """
+        Clear the cross-episode Φ rolling window.
+        Call this when transitioning to a new curriculum phase so the
+        normalization baseline isn't biased by the previous phase's Φ distribution.
+        """
+        self._phi_history = [[] for _ in range(self.B)]
+        self._phi_prev    = [0.0] * self.B
 
     # ── state ─────────────────────────────────────────────────────────────────
     def _get_state(self) -> torch.Tensor:
