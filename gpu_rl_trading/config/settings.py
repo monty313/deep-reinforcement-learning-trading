@@ -36,6 +36,7 @@ CFG = {
     "MEMORY_SIZE":     100_000,
     "TRAIN_EVERY":     4,
     "SYNC_EVERY":      200,       # steps between target-net sync
+    "PHASE":           0,      # curriculum phase 0-7  (7 = free / no mask)
     "NUM_EPISODES":    200,
     "CHECKPOINT_EVERY": 10,
 

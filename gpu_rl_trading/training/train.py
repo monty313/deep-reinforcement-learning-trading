@@ -127,12 +127,14 @@ def run_training(cfg: dict = None, resume: bool = False) -> DQNAgent:
             step += 1
 
         agent.decay_epsilon(ep)
-        ep_elapsed = time.perf_counter() - t_ep
+        ep_elapsed  = time.perf_counter() - t_ep
         mean_reward = ep_reward.mean().item()
+        ftmo_summary = env.episode_summary()
 
         print(
-            f"Ep {ep:04d} | reward={mean_reward:+.3f} | "
-            f"eps={agent.epsilon:.3f} | steps={step} | {ep_elapsed:.1f}s",
+            f"Ep {ep:04d} | ph{cfg.get('PHASE',7)} | reward={mean_reward:+.3f} | "
+            f"eps={agent.epsilon:.3f} | steps={step} | {ep_elapsed:.1f}s\n"
+            f"         FTMO: {ftmo_summary}",
             flush=True,
         )
 
@@ -140,6 +142,7 @@ def run_training(cfg: dict = None, resume: bool = False) -> DQNAgent:
         all_daily.extend(env.daily_metrics_log)
         all_ep_rows.append({
             "episode":      ep,
+            "phase":        cfg.get("PHASE", 7),
             "total_reward": round(mean_reward, 6),
             "steps":        step,
         })
