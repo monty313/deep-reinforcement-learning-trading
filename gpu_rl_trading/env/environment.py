@@ -320,10 +320,13 @@ class BatchedFTMOEnv:
         # ── close on direction reversal ───────────────────────────────────────
         close_mask = self._active & (self._position != 0) & (sign != 0) & (sign != self._position)
         if close_mask.any():
-            pnl_pct = (curr_close - self._entry_px) / (self._entry_px + 1e-8) * self._position
-            pnl_abs = pnl_pct * self._lots * 1_000.0
+            # pnl in account currency: price_diff * lots * 100_000 (1 std lot = 100k units)
+            price_diff = (curr_close - self._entry_px) * self._position
+            pnl_abs    = price_diff * self._lots * 100_000.0
+            # reward = pnl as fraction of initial equity (so agent sees meaningful signal)
+            reward_sig = pnl_abs / self.initial_equity
             self._realised_pnl = torch.where(close_mask, self._realised_pnl + pnl_abs, self._realised_pnl)
-            rewards            = torch.where(close_mask, rewards + pnl_pct, rewards)
+            rewards            = torch.where(close_mask, rewards + reward_sig, rewards)
             self._position     = torch.where(close_mask, torch.zeros_like(self._position), self._position)
             self._entry_px     = torch.where(close_mask, torch.zeros_like(self._entry_px), self._entry_px)
             self._lots         = torch.where(close_mask, torch.zeros_like(self._lots), self._lots)
@@ -331,15 +334,18 @@ class BatchedFTMOEnv:
         # ── open new position ─────────────────────────────────────────────────
         open_mask = self._active & (self._position == 0) & (sign != 0)
         if open_mask.any():
-            lots = (self._equity * lots_frac / 100_000.0).clamp(min=0.001)
-            self._position = torch.where(open_mask, sign,     self._position)
+            # lots = risk_frac * equity / (pip_value * 100_000)
+            # simplified: target ~risk_frac% of equity per 10-pip move
+            # lots = (equity * risk_frac) / (0.001 * 100_000)  →  equity * risk_frac / 100
+            lots = (self._equity * lots_frac / 100.0).clamp(min=0.001, max=100.0)
+            self._position = torch.where(open_mask, sign,       self._position)
             self._entry_px = torch.where(open_mask, curr_close, self._entry_px)
-            self._lots     = torch.where(open_mask, lots,     self._lots)
+            self._lots     = torch.where(open_mask, lots,       self._lots)
 
         # ── equity = realised + unrealised ────────────────────────────────────
         unreal_pnl = torch.where(
             self._position != 0,
-            (curr_close - self._entry_px) / (self._entry_px + 1e-8) * self._position * self._lots * 1_000.0,
+            (curr_close - self._entry_px) * self._position * self._lots * 100_000.0,
             torch.zeros_like(self._position),
         )
         self._equity = self.initial_equity + self._realised_pnl + unreal_pnl
@@ -379,18 +385,18 @@ class BatchedFTMOEnv:
         # FTMO drawdown breach penalty
         dd_now    = (self._day_high_eq - self._equity) / (self._day_high_eq + 1e-8)
         fail_mask = self._active & (dd_now > self.max_dd_pct)
-        rewards   = torch.where(fail_mask, rewards - 2.0, rewards)
+        rewards   = torch.where(fail_mask, rewards - 0.02, rewards)   # -2% of equity scale
 
-        # daily PASS bonus
+        # daily PASS/OK bonus
         if new_day.any():
             for b in range(self.B):
                 if new_day[b].item() and self._active[b].item():
                     log = self.daily_metrics_log
                     if log and log[-1]["batch"] == b:
                         if log[-1]["ftmo_flag"] == "PASS":
-                            rewards[b] = rewards[b] + 2.0
+                            rewards[b] = rewards[b] + 0.025   # +2.5% of equity scale
                         elif log[-1]["ftmo_flag"] == "OK":
-                            rewards[b] = rewards[b] + 0.5
+                            rewards[b] = rewards[b] + 0.005
 
         # ── zero out inactive episodes ────────────────────────────────────────
         rewards = torch.where(self._active, rewards, torch.zeros_like(rewards))
