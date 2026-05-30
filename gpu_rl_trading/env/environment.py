@@ -126,9 +126,11 @@ class BatchedFTMOEnv:
         self._active       = torch.ones(self.B, dtype=torch.bool, device=device)
 
         # per-batch intra-episode reward shaping trackers
-        self._consec_pass = [0]   * self.B   # consecutive PASS days this episode
-        self._prev_ret    = [0.0] * self.B   # previous day's return pct
-        self._prev_dd     = [1.0] * self.B   # previous day's dd pct
+        self._consec_pass  = [0]   * self.B   # consecutive PASS days this episode
+        self._prev_ret     = [0.0] * self.B   # previous day's return pct
+        self._prev_dd      = [1.0] * self.B   # previous day's dd pct
+        self._running_avg_ret = [0.0] * self.B  # rolling avg daily return this episode
+        self._days_seen    = [0]   * self.B   # days seen this episode (for avg)
 
         self.daily_metrics_log: List[dict] = []
         self.state_dim = self._compute_state_dim()
@@ -162,10 +164,12 @@ class BatchedFTMOEnv:
         self._entry_px     = torch.zeros(self.B, device=self.device)
         self._lots         = torch.zeros(self.B, device=self.device)
         self._prev_day     = torch.full((self.B,), -1, dtype=torch.long, device=self.device)
-        self._active       = torch.ones(self.B, dtype=torch.bool, device=self.device)
-        self._consec_pass  = [0]   * self.B
-        self._prev_ret     = [0.0] * self.B
-        self._prev_dd      = [1.0] * self.B
+        self._active          = torch.ones(self.B, dtype=torch.bool, device=self.device)
+        self._consec_pass     = [0]   * self.B
+        self._prev_ret        = [0.0] * self.B
+        self._prev_dd         = [1.0] * self.B
+        self._running_avg_ret = [0.0] * self.B
+        self._days_seen       = [0]   * self.B
         self.daily_metrics_log = []
         return self._get_state()
 
@@ -510,11 +514,28 @@ class BatchedFTMOEnv:
                 if dd_pct < self._prev_dd[b] and flag != "FAIL":
                     rewards[b] = rewards[b] + 0.005
 
-                # 5. Clean PASS (≥2.5% ret AND dd ≤1%) — already counted above
-                #    but also reward tighter dd: bonus scales with how far below 1%
+                # 5. Clean PASS — reward tighter dd
                 if flag == "PASS":
-                    dd_margin = max(0.0, 1.0 - dd_pct)   # 0→1 scale
+                    dd_margin = max(0.0, 1.0 - dd_pct)
                     rewards[b] = rewards[b] + dd_margin * 0.010
+
+                # 6. Avg return tracking — reward days above running avg,
+                #    penalise days that drag the average down
+                self._days_seen[b] += 1
+                n = self._days_seen[b]
+                old_avg = self._running_avg_ret[b]
+                new_avg = old_avg + (ret_pct - old_avg) / n   # incremental mean
+                self._running_avg_ret[b] = new_avg
+
+                if n > 1:  # need at least 2 days to compare
+                    if ret_pct > old_avg:
+                        # this day raised the average — reward proportionally
+                        improvement = (ret_pct - old_avg) / (abs(old_avg) + 1e-4)
+                        rewards[b] = rewards[b] + min(improvement * 0.010, 0.020)
+                    elif ret_pct < old_avg:
+                        # this day dragged the average down — penalise
+                        drag = (old_avg - ret_pct) / (abs(old_avg) + 1e-4)
+                        rewards[b] = rewards[b] - min(drag * 0.008, 0.015)
 
                 # update trackers
                 self._prev_ret[b] = ret_pct

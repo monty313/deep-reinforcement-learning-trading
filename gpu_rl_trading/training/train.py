@@ -73,10 +73,12 @@ class EpisodeRewardShaper:
 
     def __init__(self):
         self.ep_pass_rates:    List[float] = []
+        self.ep_fail_counts:   List[int]   = []
+        self.ep_pass_counts:   List[int]   = []
         self.ep_avg_rets:      List[float] = []
         self.ep_avg_dds:       List[float] = []
         self.ath_pass_rate:    float       = 0.0
-        self.consistency_streak: int       = 0   # episodes where pass_rate >= 0.5
+        self.consistency_streak: int       = 0
 
     def compute_bonus(
         self,
@@ -87,28 +89,28 @@ class EpisodeRewardShaper:
         if not daily_log:
             return 0.0
 
-        flags    = [r["ftmo_flag"]          for r in daily_log]
-        rets     = [r["daily_return_pct"]   for r in daily_log]
-        dds      = [r["daily_max_drawdown_pct"] for r in daily_log]
-        n        = len(flags)
-        passes   = flags.count("PASS")
+        flags     = [r["ftmo_flag"]              for r in daily_log]
+        rets      = [r["daily_return_pct"]       for r in daily_log]
+        dds       = [r["daily_max_drawdown_pct"] for r in daily_log]
+        n         = len(flags)
+        passes    = flags.count("PASS")
+        fails     = flags.count("FAIL")
         pass_rate = passes / n if n > 0 else 0.0
-        avg_ret  = sum(rets) / n
-        avg_dd   = sum(dds)  / n
+        avg_ret   = sum(rets) / n
+        avg_dd    = sum(dds)  / n
 
         bonus = 0.0
 
         # ── 1. Consecutive PASS day streak ────────────────────────────────────
-        # grows non-linearly: streak^1.5 * 0.01
         if consec_pass_days >= 2:
             bonus += (consec_pass_days ** 1.5) * 0.01
 
-        # ── 2. Better return than last episode ────────────────────────────────
+        # ── 2. Better avg return than last episode ────────────────────────────
         if self.ep_avg_rets and avg_ret > self.ep_avg_rets[-1]:
             improvement = avg_ret - self.ep_avg_rets[-1]
-            bonus += min(improvement * 0.05, 0.05)   # cap at 0.05
+            bonus += min(improvement * 0.05, 0.05)
 
-        # ── 3. Lower dd than last episode ─────────────────────────────────────
+        # ── 3. Lower avg dd than last episode ────────────────────────────────
         if self.ep_avg_dds and avg_dd < self.ep_avg_dds[-1]:
             improvement = self.ep_avg_dds[-1] - avg_dd
             bonus += min(improvement * 0.05, 0.05)
@@ -119,27 +121,42 @@ class EpisodeRewardShaper:
             self.ath_pass_rate = pass_rate
             print(f"  [★ ATH pass rate] {pass_rate:.1%}", flush=True)
 
-        # ── 5. Win-rate improvement ───────────────────────────────────────────
+        # ── 5. More PASSes than last episode ─────────────────────────────────
+        if self.ep_pass_counts and passes > self.ep_pass_counts[-1]:
+            extra = passes - self.ep_pass_counts[-1]
+            bonus += extra * 0.015
+            print(f"  [★ +{extra} PASS days vs last ep]  bonus={extra*0.015:.3f}",
+                  flush=True)
+
+        # ── 6. More FAILs than last episode — big penalty ─────────────────────
+        if self.ep_fail_counts and fails > self.ep_fail_counts[-1]:
+            extra = fails - self.ep_fail_counts[-1]
+            penalty = extra * 0.030   # 2x the pass bonus — asymmetric
+            bonus  -= penalty
+            print(f"  [✗ +{extra} FAIL days vs last ep]  penalty=-{penalty:.3f}",
+                  flush=True)
+
+        # ── 7. Win-rate improvement over 3-ep rolling avg ────────────────────
         if len(self.ep_pass_rates) >= 3:
             prev_avg = sum(self.ep_pass_rates[-3:]) / 3
             if pass_rate > prev_avg:
                 bonus += (pass_rate - prev_avg) * 0.20
 
-        # ── 6. 5-episode consistency window ──────────────────────────────────
-        # If pass_rate >= 0.50 this episode, increment streak; else reset.
-        # Bonus grows with streak: 0.05 * streak (so ep5=0.25, ep10=0.50, etc.)
+        # ── 8. Consistency streak (≥50% pass rate) ───────────────────────────
         if pass_rate >= 0.50:
             self.consistency_streak += 1
             consistency_bonus = 0.05 * self.consistency_streak
             bonus += consistency_bonus
             if self.consistency_streak >= 5:
-                print(f"  [★ consistency] {self.consistency_streak} episodes "
-                      f"≥50% pass rate  bonus={consistency_bonus:.3f}", flush=True)
+                print(f"  [★ consistency] {self.consistency_streak} eps "
+                      f"≥50% pass  bonus={consistency_bonus:.3f}", flush=True)
         else:
             self.consistency_streak = 0
 
         # ── record for next episode ───────────────────────────────────────────
         self.ep_pass_rates.append(pass_rate)
+        self.ep_pass_counts.append(passes)
+        self.ep_fail_counts.append(fails)
         self.ep_avg_rets.append(avg_ret)
         self.ep_avg_dds.append(avg_dd)
 
