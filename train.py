@@ -189,13 +189,15 @@ def main():
     t0 = _stage(f"Stage 6/8 — Curriculum training ({len(phases_to_run)} phases)")
     for phase_cfg in tqdm(phases_to_run, desc="Curriculum phases", unit="phase"):
         agent = run_phase(
-            phase_cfg    = phase_cfg,
-            data_dict    = train_data,
-            cfg          = cfg,
-            agent        = agent,
-            logger       = None,
-            run_id       = run_id,
-            advance_days = advance,
+            phase_cfg              = phase_cfg,
+            data_dict              = train_data,
+            cfg                    = cfg,
+            agent                  = agent,
+            logger                 = None,
+            run_id                 = run_id,
+            advance_days           = advance,
+            checkpoint_every       = cfg.get("RL", {}).get("CHECKPOINT_EVERY", 10),
+            resume_from_checkpoint = cfg.get("RL", {}).get("RESUME_FROM_CHECKPOINT", False),
         )
         paths = _paths(cfg, phase_cfg["id"], run_id)
         if phase_cfg["id"] < 7:

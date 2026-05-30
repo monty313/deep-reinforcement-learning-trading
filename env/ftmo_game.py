@@ -235,6 +235,10 @@ class FTMOGame:
         self.trade_log  = []
         self.total_fees = 0.0
 
+        # FTMO daily metrics log — one dict per completed CET day
+        # {"date", "daily_return_pct", "daily_max_drawdown_pct", "ftmo_flag"}
+        self.daily_metrics_log: List[dict] = []
+
         self._rolling_returns: List[float] = []
         self._ath_sharpe: float = 0.0
 
@@ -286,7 +290,26 @@ class FTMOGame:
             self._curr_day = curr_day
             return
         if curr_day != self._curr_day:
-            result = self.ftmo_day.classify()
+            result      = self.ftmo_day.classify()
+            ret_pct     = self.ftmo_day.daily_return * 100.0
+            dd_pct      = self.ftmo_day.daily_drawdown * 100.0
+            ftmo_flag   = (
+                "PASS" if ret_pct >= 2.5 and dd_pct <= 1.0 else
+                "OK"   if ret_pct >= 0.0 and dd_pct <= 1.0 else
+                "FAIL"
+            )
+            row = {
+                "date":                  self._curr_day,
+                "daily_return_pct":      round(ret_pct, 4),
+                "daily_max_drawdown_pct": round(dd_pct, 4),
+                "ftmo_flag":             ftmo_flag,
+            }
+            self.daily_metrics_log.append(row)
+            print(
+                f"{self._curr_day} | ret={ret_pct:+.2f}% | "
+                f"dd={dd_pct:.2f}% | {ftmo_flag}",
+                flush=True,
+            )
             self._day_results.append(result)
             self._update_streak(result)
             self.ftmo_day = FTMODay(
@@ -295,7 +318,7 @@ class FTMOGame:
                 **self.ftmo_cfg
             )
             self._curr_day = curr_day
-            self._daily_trade_count = 0   # reset daily trade counter
+            self._daily_trade_count = 0
 
     def _update_streak(self, result: str):
         if result == "pass":
@@ -549,9 +572,10 @@ class FTMOGame:
             training_mode=self.rl_training_mode,
             **self.ftmo_cfg
         )
-        self.is_over           = False
-        self.reward            = 0.0
-        self.trade_log         = []
+        self.is_over            = False
+        self.reward             = 0.0
+        self.trade_log          = []
+        self.daily_metrics_log  = []
         self._daily_trade_count = 0
-        self._lookup_cache     = {}
+        self._lookup_cache      = {}
         self._check_day_boundary()

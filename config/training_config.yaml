@@ -73,6 +73,8 @@ RL:
   TEST_MODE:       false
   TRAIN_EVERY:     4
   compute_heavy_indicators: false
+  CHECKPOINT_EVERY: 10          # save model weights every N episodes
+  RESUME_FROM_CHECKPOINT: false # set true to load latest checkpoint on start
 
 # ── Action / risk ──────────────────────────────────────────────────────────────
 ACTIONS:

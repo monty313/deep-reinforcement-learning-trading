@@ -49,14 +49,22 @@ def _paths(cfg: dict, phase: int, run_id: str) -> dict:
 
 # ── single-phase training loop ────────────────────────────────────────────────
 
+def _latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
+    """Return the most recently modified .h5 file in ckpt_dir, or None."""
+    files = sorted(ckpt_dir.glob("*.h5"), key=lambda p: p.stat().st_mtime)
+    return files[-1] if files else None
+
+
 def run_phase(
-    phase_cfg:     dict,
-    data_dict:     dict,
-    cfg:           dict,
-    agent:         DQNAgent,
-    logger:        Optional[WandbLogger],
-    run_id:        str,
-    advance_days:  int = 10,
+    phase_cfg:              dict,
+    data_dict:              dict,
+    cfg:                    dict,
+    agent:                  DQNAgent,
+    logger:                 Optional[WandbLogger],
+    run_id:                 str,
+    advance_days:           int  = 10,
+    checkpoint_every:       int  = 10,
+    resume_from_checkpoint: bool = False,
 ) -> DQNAgent:
     """
     Run one curriculum phase until 10 consecutive pass-days or data exhaustion.
@@ -69,6 +77,37 @@ def run_phase(
                   "max_dd_pct":        cfg["FTMO"]["daily_max_drawdown_pct"]}
     reward_cfg = cfg["REWARD"]
     paths      = _paths(cfg, phase_id, run_id)
+
+    # ── metrics output paths ──────────────────────────────────────────────────
+    sym_slug   = "_".join(symbols)
+    metrics_dir = Path("metrics")
+    metrics_dir.mkdir(exist_ok=True)
+    ftmo_csv_path   = metrics_dir / f"metrics_{sym_slug}_ftmo.csv"
+    reward_csv_path = metrics_dir / f"episode_rewards_{sym_slug}.csv"
+
+    # ── checkpoint dir ────────────────────────────────────────────────────────
+    ckpt_dir = Path("checkpoints") / run_id / f"phase{phase_id}"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── resume from latest checkpoint ────────────────────────────────────────
+    start_episode = 0
+    if resume_from_checkpoint:
+        latest = _latest_checkpoint(ckpt_dir)
+        if latest:
+            agent.q_net.load_weights(str(latest))
+            agent.r_net.load_weights(str(latest))
+            # parse episode number from filename e.g. eurusd_model_ep042.h5
+            try:
+                start_episode = int(latest.stem.split("_ep")[-1])
+            except Exception:
+                start_episode = 0
+            print(f"[resume] Loaded checkpoint {latest.name} (ep {start_episode})", flush=True)
+        else:
+            print("[resume] No checkpoint found — starting fresh.", flush=True)
+
+    # accumulators across the whole phase
+    all_daily_rows:   List[dict] = []
+    all_episode_rows: List[dict] = []
 
     # Build environment for this phase
     training_mode = cfg["FTMO"].get("training_mode", True)
@@ -88,7 +127,7 @@ def run_phase(
     )
 
     consecutive_pass    = 0
-    episode             = 0
+    episode             = start_episode
     pnls                = []
     trade_logs          = pd.DataFrame()
     phase_start         = time.perf_counter()
@@ -117,10 +156,12 @@ def run_phase(
         env.reset()
         if saved_idx > env.init_idx:
             env.curr_idx = saved_idx
+        ep_start_date = str(env._curr_time().date())
         state_tp1 = env.get_state()
         eps       = DQNAgent.epsilon(episode, rl_cfg["EPSILON"], rl_cfg["EPS_MIN"])
-        game_over = False
-        step      = 0
+        game_over      = False
+        step           = 0
+        episode_reward = 0.0
 
         train_every = rl_cfg.get("TRAIN_EVERY", 4)
         while not game_over:
@@ -132,6 +173,7 @@ def run_phase(
             state_t   = state_tp1
             actions   = agent.select_actions(state_t, eps)
             reward, game_over = env.act(actions)
+            episode_reward += reward
             env.step()
             state_tp1 = env.get_state()
 
@@ -145,8 +187,26 @@ def run_phase(
             if game_over and rl_cfg["UPDATE_QR"]:
                 agent.sync_r_net()
 
-        ep_elapsed = time.perf_counter() - ep_start
+        ep_elapsed    = time.perf_counter() - ep_start
+        ep_end_date   = str(env._curr_time().date())
         pnls.append(env.equity - env.initial_equity)
+
+        # collect daily FTMO rows emitted this episode
+        all_daily_rows.extend(env.daily_metrics_log)
+
+        # record episode reward
+        ep_row = {
+            "episode":      episode,
+            "total_reward": round(episode_reward, 6),
+            "start_date":   ep_start_date,
+            "end_date":     ep_end_date,
+        }
+        all_episode_rows.append(ep_row)
+        print(
+            f"  Ep {episode:04d} | reward={episode_reward:+.3f} | "
+            f"equity {env.equity:,.0f} | eps {eps:.3f} | {ep_elapsed:.1f}s",
+            flush=True,
+        )
         last_result = env.ftmo_day.classify() if env._day_results else "ok"
         if last_result == "pass":
             consecutive_pass += 1
@@ -161,12 +221,6 @@ def run_phase(
             eps=f"{eps:.3f}",
             secs=f"{ep_elapsed:.1f}s",
         )
-        if episode % 50 == 0 or consecutive_pass >= advance_days - 1:
-            print(f"  Ep {episode:04d} | ph{phase_id} | "
-                  f"equity {env.equity:,.0f} | streak {env.days_in_streak} | "
-                  f"consec_pass {consecutive_pass} | eps {eps:.4f} | "
-                  f"{ep_elapsed:.1f}s", flush=True)
-
         if logger:
             logger.log({
                 "phase":     phase_id,
@@ -177,11 +231,21 @@ def run_phase(
                 "last_day":  last_result,
             })
 
-        # Save every 50 episodes
-        if not episode % 50:
+        # ── checkpoint every N episodes ───────────────────────────────────────
+        if episode % checkpoint_every == 0:
+            ckpt_file = ckpt_dir / f"{sym_slug}_model_ep{episode:04d}.h5"
+            agent.q_net.save_weights(str(ckpt_file))
+            print(f"  [ckpt] saved {ckpt_file.name}", flush=True)
+
+        # ── flush metrics CSVs every 50 episodes ─────────────────────────────
+        if episode % 50 == 0:
             agent.save(paths["weights"], paths["replay"], paths["risk"])
             tl = pd.DataFrame(env.trade_log)
             tl.to_pickle(paths["trades"])
+            if all_daily_rows:
+                pd.DataFrame(all_daily_rows).to_csv(ftmo_csv_path, index=False)
+            if all_episode_rows:
+                pd.DataFrame(all_episode_rows).to_csv(reward_csv_path, index=False)
 
         # Advance phase when consecutive pass-days target reached
         if consecutive_pass >= advance_days:
@@ -194,6 +258,15 @@ def run_phase(
     print(f"[DONE]  Phase {phase_id} — {episode} episodes in "
           f"{phase_elapsed:.1f}s ({phase_elapsed/60:.1f} min)", flush=True)
     agent.save(paths["weights"], paths["replay"], paths["risk"])
+
+    # final CSV flush
+    if all_daily_rows:
+        pd.DataFrame(all_daily_rows).to_csv(ftmo_csv_path, index=False)
+        print(f"[metrics] FTMO daily log  -> {ftmo_csv_path}", flush=True)
+    if all_episode_rows:
+        pd.DataFrame(all_episode_rows).to_csv(reward_csv_path, index=False)
+        print(f"[metrics] Episode rewards -> {reward_csv_path}", flush=True)
+
     return agent
 
 
