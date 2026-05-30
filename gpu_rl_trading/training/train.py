@@ -97,7 +97,7 @@ class EpisodeRewardShaper:
         dd_norm  = avg_dd  / (self.max_dd_pct  * 100.0 + 1e-8)
         return (pass_rate * max(ret_norm, 0.0)) / (1.0 + self.lam * dd_norm)
 
-    def compute_bonus(self, daily_log: list, consec_pass_days: int) -> float:
+    def compute_bonus(self, daily_log: list) -> float:
         """
         Return scalar episode-end bonus reward (added to replay as terminal signal).
         Returns 0.0 during warm-up.
@@ -241,7 +241,7 @@ def run_phase(
 
         # ── episode-level Φ shaping bonus ─────────────────────────────────────
         shaper.global_ep = global_ep
-        ep_bonus = shaper.compute_bonus(env.daily_metrics_log, ep_best_consec)
+        ep_bonus = shaper.compute_bonus(env.daily_metrics_log)
         if ep_bonus != 0.0:
             # Add to the last real terminal transition in the replay buffer
             # by storing a proper (s, a, r=bonus, s', done=True) tuple using

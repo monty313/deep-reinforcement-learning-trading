@@ -34,8 +34,9 @@ CFG = {
     "EPSILON_MIN":     0.05,
     "BATCH_SIZE_RL":   256,
     "MEMORY_SIZE":     100_000,
-    "TRAIN_EVERY":     4,
-    "SYNC_EVERY":      200,       # steps between target-net sync
+    "TRAIN_EVERY":              4,
+    "SYNC_EVERY":               200,   # steps between target-net sync
+    "EPSILON_DECAY_EPISODES":   500,   # episodes to decay from EPSILON to EPS_MIN
     "PHASE":                  0,      # starting phase (0-7)
     "ADVANCE_DAYS":           10,     # consecutive PASS days to advance phase
     "MAX_EPISODES_PER_PHASE": 500,    # hard cap per phase

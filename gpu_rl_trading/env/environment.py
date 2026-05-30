@@ -200,7 +200,7 @@ class BatchedFTMOEnv:
         parts = []
         for tf in self.tf_factors:
             feat   = self._resampled[tf]
-            tf_idx = (abs_idx // tf).clamp(self.lkbk, feat.shape[0] - 1)
+            tf_idx = (abs_idx // tf).clamp(0, feat.shape[0] - 1)
             offsets = torch.arange(self.lkbk - 1, -1, -1, device=self.device)
             win_idx = (tf_idx.unsqueeze(1) - offsets.unsqueeze(0)).clamp(0, feat.shape[0] - 1)
             window  = feat[win_idx]                                      # (B, lkbk, F)
@@ -517,8 +517,10 @@ class BatchedFTMOEnv:
                     hi_eq   = float(self._day_high_eq[b])
                     eq_now  = float(self._equity[b])
                     dd_pct  = max(0.0, (hi_eq - eq_now) / (hi_eq + 1e-8) * 100)
-                    flag    = ("PASS" if ret_pct >= 2.5 and dd_pct <= 1.0 else
-                               "OK"   if ret_pct >= 0.0 and dd_pct <= 1.0 else "FAIL")
+                    target_threshold = self.target_pct * 100.0
+                    dd_threshold     = self.max_dd_pct  * 100.0
+                    flag    = ("PASS" if ret_pct >= target_threshold and dd_pct <= dd_threshold else
+                               "OK"   if ret_pct >= 0.0              and dd_pct <= dd_threshold else "FAIL")
                     self.daily_metrics_log.append({
                         "batch":                  b,
                         "day_idx":                int(self._prev_day[b]),

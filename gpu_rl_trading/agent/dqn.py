@@ -134,8 +134,16 @@ class DQNAgent:
         return loss.item()
 
     def decay_epsilon(self, episode: int):
-        self.epsilon = max(self.eps_min,
-                           self.cfg["EPSILON_START"] ** (1 + episode / 50))
+        # Exponential decay: epsilon halves roughly every 100 episodes
+        # eps = start * (min/start)^(episode / decay_episodes)
+        # decay_episodes = 500 gives: ep0=0.9, ep100=~0.72, ep300=~0.46, ep500=0.05
+        decay_episodes = self.cfg.get("EPSILON_DECAY_EPISODES", 500)
+        eps_min = self.cfg.get("EPSILON_MIN", self.eps_min)
+        ratio = eps_min / (self.cfg["EPSILON_START"] + 1e-8)
+        self.epsilon = max(
+            self.eps_min,
+            self.cfg["EPSILON_START"] * (ratio ** (episode / decay_episodes))
+        )
 
     def save(self, path: str):
         """Save checkpoint. Always stores state_dim so partial loads work."""
