@@ -334,10 +334,17 @@ class BatchedFTMOEnv:
         # ── open new position ─────────────────────────────────────────────────
         open_mask = self._active & (self._position == 0) & (sign != 0)
         if open_mask.any():
-            # lots = risk_frac * equity / (pip_value * 100_000)
-            # simplified: target ~risk_frac% of equity per 10-pip move
-            # lots = (equity * risk_frac) / (0.001 * 100_000)  →  equity * risk_frac / 100
-            lots = (self._equity * lots_frac / 100.0).clamp(min=0.001, max=100.0)
+            # FTMO 1:100 leverage. Risk sizing: lose risk_frac% of equity on a 20-pip move.
+            # pip_value for EURUSD = $10/pip per standard lot (100k units).
+            # lots = (equity * risk_frac) / (20 pips * $10/pip)
+            #      = equity * risk_frac / 200
+            # e.g. small (0.005): 100,000 * 0.005 / 200 = 2.5 lots
+            #      med   (0.010): 100,000 * 0.010 / 200 = 5.0 lots
+            #      large (0.020): 100,000 * 0.020 / 200 = 10.0 lots
+            # Max lots capped by leverage: equity * 100 / 100_000
+            max_lots = (self._equity * 100.0 / 100_000.0).clamp(min=0.01)
+            lots = (self._equity * lots_frac / 200.0).clamp(min=0.01)
+            lots = torch.minimum(lots, max_lots)
             self._position = torch.where(open_mask, sign,       self._position)
             self._entry_px = torch.where(open_mask, curr_close, self._entry_px)
             self._lots     = torch.where(open_mask, lots,       self._lots)
