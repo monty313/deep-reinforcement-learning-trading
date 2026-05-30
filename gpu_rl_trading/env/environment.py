@@ -366,6 +366,7 @@ class BatchedFTMOEnv:
                         "daily_max_drawdown_pct": round(dd_pct, 4),
                         "ftmo_flag":              flag,
                     })
+                    print(f"  [b{b}] day {int(self._prev_day[b])} | ret={ret_pct:+.2f}% | dd={dd_pct:.2f}% | {flag}", flush=True)
 
             # reset day trackers
             self._day_start_eq = torch.where(new_day, self._equity.detach(), self._day_start_eq)
