@@ -2,6 +2,8 @@
 
 ## Pending
 
+- [ ] **Phase advancement logic** — GPU training loop currently runs all `NUM_EPISODES` on one phase regardless of performance. Add consecutive PASS-day tracking per batch item: when any batch item achieves 5 consecutive PASS days, advance to the next phase (same logic as CPU `curriculum_trainer.py`). Also add multi-phase loop so training automatically progresses from phase 0 → 7 without manual intervention.
+
 - [ ] **Parameterizable targets** — feed `daily_target_pct` and `max_dd_pct` as explicit state features, randomize them each episode during training (e.g. target 1–5%, dd 0.5–2%) so the policy generalizes to any target/risk combination set at inference time
 
 ---
