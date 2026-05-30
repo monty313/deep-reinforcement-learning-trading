@@ -46,10 +46,10 @@ CFG = {
     # Φ = (pass_rate × avg_ret_normalised) / (1 + λ × avg_dd_normalised)
     # Normalised to configured targets so these values never need retuning
     # when DAILY_TARGET_PCT or DAILY_MAX_DD_PCT change.
-    "SHAPE_ALPHA":   0.01,   # gain — shaping stays ≤1% of typical reward magnitude
-    "SHAPE_CLIP":    0.03,   # max shaping per step (≈10% of base PASS reward 0.025 + 0.005 OK)
+    "SHAPE_ALPHA":   0.006,  # gain — shaping max ≈ ¼ of PASS reward (0.025)
+    "SHAPE_CLIP":    0.006,  # hard cap — shaping never exceeds ±0.006 (< FAIL penalty 0.010)
     "SHAPE_LAMBDA":  5.0,    # dd penalty weight (dd at limit cuts Φ in half)
-    "SHAPE_WARMUP":  50,     # episodes before shaping activates
+    "SHAPE_WARMUP":  150,    # episodes before shaping activates (agent needs baseline first)
 
     # Paths (relative to gpu_rl_trading/)
     "CHECKPOINT_DIR":  str(ROOT / "checkpoints"),

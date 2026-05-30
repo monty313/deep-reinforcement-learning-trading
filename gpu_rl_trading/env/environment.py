@@ -136,14 +136,18 @@ class BatchedFTMOEnv:
         self._shape_lambda  = float(cfg.get("SHAPE_LAMBDA",  5.0))   # dd penalty weight
         self._shape_warmup  = int(  cfg.get("SHAPE_WARMUP",  50))    # episodes before shaping on
 
-        # per-batch Φ trackers (reset each episode)
-        self._phi_prev      = [0.0] * self.B   # Φ at end of previous day
-        self._phi_history   = [[] for _ in range(self.B)]  # rolling window for σ
+        # per-batch Φ trackers
+        # _phi_prev / _days_seen / _ep_* reset each episode (per-episode accumulators)
+        # _phi_history intentionally persists across episodes — it is the rolling
+        # window used to compute σ_Φ for normalization.  Resetting it would destroy
+        # the baseline needed to measure progress. It self-manages at max 20 entries.
+        self._phi_prev      = [0.0] * self.B
+        self._phi_history   = [[] for _ in range(self.B)]  # cross-episode rolling window
         self._days_seen     = [0]  * self.B
         self._ep_pass_count = [0]  * self.B
         self._ep_ret_sum    = [0.0]* self.B
         self._ep_dd_sum     = [0.0]* self.B
-        self._episode_count = 0    # incremented by trainer via env.start_episode()
+        self._episode_count = 0    # set by trainer via env.start_episode()
 
         self.daily_metrics_log: List[dict] = []
         self.state_dim = self._compute_state_dim()
