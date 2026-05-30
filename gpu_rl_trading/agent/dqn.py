@@ -1,6 +1,9 @@
 """
 gpu_rl_trading/agent/dqn.py
 PyTorch DQN agent for GPU-centric FTMO trading.
+
+Transfer-learning compatible: checkpoints store state_dim so partial loads
+work automatically when state_dim grows (new features) or rewards change.
 """
 from __future__ import annotations
 
@@ -16,6 +19,9 @@ from gpu_rl_trading.agent.replay import GPUReplayBuffer
 class QNetwork(nn.Module):
     def __init__(self, state_dim: int, num_actions: int, hidden: int = 256):
         super().__init__()
+        self.state_dim   = state_dim
+        self.num_actions = num_actions
+        self.hidden      = hidden
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden),
             nn.ReLU(),
@@ -26,6 +32,46 @@ class QNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+    def load_partial(self, state_dict: dict, old_state_dim: int):
+        """
+        Load weights from a checkpoint with a different (smaller) state_dim.
+
+        The first layer expands from (old_state_dim, hidden) to (state_dim, hidden).
+        Old feature weights are preserved exactly. New feature columns are
+        zero-initialised so they start neutral and are learned from scratch.
+        All subsequent layers (hidden→hidden/2→actions) load exactly as-is.
+
+        Args:
+            state_dict   : the checkpoint's q_net or target_net state_dict
+            old_state_dim: state_dim stored in the checkpoint
+        """
+        own = self.state_dict()
+
+        for name, param in state_dict.items():
+            if name not in own:
+                continue
+
+            if name == "net.0.weight":
+                # shape: (hidden, state_dim)  — expand along dim=1
+                new_w = own[name].clone()          # (hidden, new_state_dim)
+                cols  = min(old_state_dim, new_w.shape[1])
+                new_w[:, :cols] = param[:, :cols]  # copy old columns
+                # new columns stay zero-initialised
+                own[name] = new_w
+
+            elif name == "net.0.bias":
+                own[name] = param                  # bias shape unchanged
+
+            else:
+                # all deeper layers: load directly (shapes are identical)
+                if own[name].shape == param.shape:
+                    own[name] = param
+                else:
+                    print(f"[transfer] skipping {name}: "
+                          f"shape {param.shape} != {own[name].shape}", flush=True)
+
+        self.load_state_dict(own)
 
 
 class DQNAgent:
@@ -92,20 +138,46 @@ class DQNAgent:
                            self.cfg["EPSILON_START"] ** (1 + episode / 50))
 
     def save(self, path: str):
+        """Save checkpoint. Always stores state_dim so partial loads work."""
         torch.save({
-            "q_net":     self.q_net.state_dict(),
-            "target":    self.target_net.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "epsilon":   self.epsilon,
-            "step":      self._step_count,
+            "q_net":      self.q_net.state_dict(),
+            "target":     self.target_net.state_dict(),
+            "optimizer":  self.optimizer.state_dict(),
+            "epsilon":    self.epsilon,
+            "step":       self._step_count,
+            "state_dim":  self.state_dim,    # ← stored for transfer learning
         }, path)
         print(f"[ckpt] saved -> {path}", flush=True)
 
-    def load(self, path: str):
+    def load(self, path: str, partial: bool = False):
+        """
+        Load checkpoint.
+
+        Args:
+            path    : path to .pt file
+            partial : if True, use transfer learning when state_dim differs.
+                      Old feature weights are preserved; new columns zero-init.
+                      If False (default), standard exact load — raises on mismatch.
+        """
         ckpt = torch.load(path, map_location=self.device)
-        self.q_net.load_state_dict(ckpt["q_net"])
-        self.target_net.load_state_dict(ckpt["target"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
+        ckpt_state_dim = ckpt.get("state_dim", self.state_dim)
+
+        if partial and ckpt_state_dim != self.state_dim:
+            print(f"[transfer] state_dim {ckpt_state_dim} → {self.state_dim} "
+                  f"(+{self.state_dim - ckpt_state_dim} features)", flush=True)
+            self.q_net.load_partial(ckpt["q_net"], ckpt_state_dim)
+            self.target_net.load_partial(ckpt["target"], ckpt_state_dim)
+            # rebuild optimizer for the new network parameters
+            self.optimizer = torch.optim.Adam(
+                self.q_net.parameters(), lr=self.cfg["LR"])
+            print("[transfer] optimizer reset for new architecture", flush=True)
+        else:
+            self.q_net.load_state_dict(ckpt["q_net"])
+            self.target_net.load_state_dict(ckpt["target"])
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+
         self.epsilon     = ckpt.get("epsilon", self.cfg["EPSILON_START"])
         self._step_count = ckpt.get("step", 0)
-        print(f"[ckpt] loaded <- {path}", flush=True)
+
+        mode = "partial/transfer" if (partial and ckpt_state_dim != self.state_dim) else "exact"
+        print(f"[ckpt] loaded ({mode}) <- {path}", flush=True)

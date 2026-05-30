@@ -20,6 +20,8 @@
 
 ## Completed
 
+- [x] **Transfer learning compatibility** — checkpoints store `state_dim`; `load(partial=True)` preserves old feature weights and zero-inits new columns; `train.py` auto-detects when partial load is needed on resume
+
 - [x] Dynamic lot sizing based on ATR and FTMO gap
 - [x] Phase masks matching CPU curriculum (phases 0–7)
 - [x] Correct PnL formula (price_diff * lots * 100,000)

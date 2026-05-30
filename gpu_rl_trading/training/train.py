@@ -90,12 +90,19 @@ def run_training(cfg: dict = None, resume: bool = False) -> DQNAgent:
     metrics_dir = Path(cfg["METRICS_DIR"])
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 3. Optional resume ────────────────────────────────────────────────────
+    # ── 3. Optional resume (transfer-learning aware) ──────────────────────────
     start_ep = 0
     if resume:
         ck = latest_checkpoint(ckpt_dir)
         if ck:
-            agent.load(str(ck))
+            # peek at the checkpoint's state_dim to decide exact vs partial load
+            ckpt_meta     = torch.load(str(ck), map_location="cpu")
+            ckpt_state_dim = ckpt_meta.get("state_dim", env.state_dim)
+            use_partial   = (ckpt_state_dim != env.state_dim)
+            if use_partial:
+                print(f"[resume] state_dim changed {ckpt_state_dim}→{env.state_dim} "
+                      f"— using transfer learning", flush=True)
+            agent.load(str(ck), partial=use_partial)
             try:
                 start_ep = int(ck.stem.split("_ep")[-1])
             except Exception:
