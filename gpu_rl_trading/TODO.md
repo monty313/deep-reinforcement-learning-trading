@@ -2,7 +2,7 @@
 
 ## Pending
 
-- [ ] **Phase advancement logic** — GPU training loop currently runs all `NUM_EPISODES` on one phase regardless of performance. Add consecutive PASS-day tracking per batch item: when any batch item achieves 5 consecutive PASS days, advance to the next phase (same logic as CPU `curriculum_trainer.py`). Also add multi-phase loop so training automatically progresses from phase 0 → 7 without manual intervention.
+- [x] **Phase advancement logic** — GPU training loop currently runs all `NUM_EPISODES` on one phase regardless of performance. Add consecutive PASS-day tracking per batch item: when any batch item achieves 5 consecutive PASS days, advance to the next phase (same logic as CPU `curriculum_trainer.py`). Also add multi-phase loop so training automatically progresses from phase 0 → 7 without manual intervention.
 
 - [ ] **Learned lot sizing (adaptive position sizing network)** — replace the current ATR-based `_dynamic_lots` formula with a small neural net that takes equity, gap-to-target, dd-headroom, and ATR as inputs and outputs lot size directly. Trained alongside the DQN. Directly fixes the catastrophic `-80%` days caused by oversized positions.
 

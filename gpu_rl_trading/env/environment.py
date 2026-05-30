@@ -125,6 +125,11 @@ class BatchedFTMOEnv:
         self._prev_day     = torch.full((self.B,), -1, dtype=torch.long, device=device)
         self._active       = torch.ones(self.B, dtype=torch.bool, device=device)
 
+        # per-batch intra-episode reward shaping trackers
+        self._consec_pass = [0]   * self.B   # consecutive PASS days this episode
+        self._prev_ret    = [0.0] * self.B   # previous day's return pct
+        self._prev_dd     = [1.0] * self.B   # previous day's dd pct
+
         self.daily_metrics_log: List[dict] = []
         self.state_dim = self._compute_state_dim()
 
@@ -158,6 +163,9 @@ class BatchedFTMOEnv:
         self._lots         = torch.zeros(self.B, device=self.device)
         self._prev_day     = torch.full((self.B,), -1, dtype=torch.long, device=self.device)
         self._active       = torch.ones(self.B, dtype=torch.bool, device=self.device)
+        self._consec_pass  = [0]   * self.B
+        self._prev_ret     = [0.0] * self.B
+        self._prev_dd      = [1.0] * self.B
         self.daily_metrics_log = []
         return self._get_state()
 
@@ -452,21 +460,65 @@ class BatchedFTMOEnv:
         self._day_high_eq = torch.maximum(self._day_high_eq, self._equity.detach())
         self._prev_day    = torch.where(self._active, day_idx, self._prev_day)
 
-        # FTMO drawdown breach penalty
+        # ── FTMO drawdown breach penalty ──────────────────────────────────────
         dd_now    = (self._day_high_eq - self._equity) / (self._day_high_eq + 1e-8)
         fail_mask = self._active & (dd_now > self.max_dd_pct)
-        rewards   = torch.where(fail_mask, rewards - 0.02, rewards)   # -2% of equity scale
+        rewards   = torch.where(fail_mask, rewards - 0.02, rewards)
 
-        # daily PASS/OK bonus
+        # ── day-boundary reward shaping ───────────────────────────────────────
         if new_day.any():
+            # find the most recent log entry per batch
+            batch_latest = {}
+            for row in reversed(self.daily_metrics_log):
+                b = row["batch"]
+                if b not in batch_latest:
+                    batch_latest[b] = row
+
             for b in range(self.B):
-                if new_day[b].item() and self._active[b].item():
-                    log = self.daily_metrics_log
-                    if log and log[-1]["batch"] == b:
-                        if log[-1]["ftmo_flag"] == "PASS":
-                            rewards[b] = rewards[b] + 0.025   # +2.5% of equity scale
-                        elif log[-1]["ftmo_flag"] == "OK":
-                            rewards[b] = rewards[b] + 0.005
+                if not (new_day[b].item() and self._active[b].item()):
+                    continue
+                row = batch_latest.get(b)
+                if row is None:
+                    continue
+
+                flag    = row["ftmo_flag"]
+                ret_pct = row["daily_return_pct"]
+                dd_pct  = row["daily_max_drawdown_pct"]
+
+                # 1. Base PASS / OK reward
+                if flag == "PASS":
+                    rewards[b] = rewards[b] + 0.025
+                elif flag == "OK":
+                    rewards[b] = rewards[b] + 0.005
+                else:
+                    rewards[b] = rewards[b] - 0.010   # FAIL penalty
+
+                # 2. Consecutive PASS day streak — grows non-linearly
+                if flag == "PASS":
+                    self._consec_pass[b] += 1
+                    streak = self._consec_pass[b]
+                    streak_bonus = (streak ** 1.5) * 0.005
+                    rewards[b] = rewards[b] + streak_bonus
+                else:
+                    self._consec_pass[b] = 0
+
+                # 3. Return improving day over day
+                if ret_pct > self._prev_ret[b] and ret_pct > 0:
+                    rewards[b] = rewards[b] + 0.005
+
+                # 4. DD decreasing day over day
+                if dd_pct < self._prev_dd[b] and flag != "FAIL":
+                    rewards[b] = rewards[b] + 0.005
+
+                # 5. Clean PASS (≥2.5% ret AND dd ≤1%) — already counted above
+                #    but also reward tighter dd: bonus scales with how far below 1%
+                if flag == "PASS":
+                    dd_margin = max(0.0, 1.0 - dd_pct)   # 0→1 scale
+                    rewards[b] = rewards[b] + dd_margin * 0.010
+
+                # update trackers
+                self._prev_ret[b] = ret_pct
+                self._prev_dd[b]  = dd_pct
 
         # ── zero out inactive episodes ────────────────────────────────────────
         rewards = torch.where(self._active, rewards, torch.zeros_like(rewards))

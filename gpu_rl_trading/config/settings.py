@@ -36,8 +36,10 @@ CFG = {
     "MEMORY_SIZE":     100_000,
     "TRAIN_EVERY":     4,
     "SYNC_EVERY":      200,       # steps between target-net sync
-    "PHASE":           0,      # curriculum phase 0-7  (7 = free / no mask)
-    "NUM_EPISODES":    200,
+    "PHASE":                  0,      # starting phase (0-7)
+    "ADVANCE_DAYS":           10,     # consecutive PASS days to advance phase
+    "MAX_EPISODES_PER_PHASE": 500,    # hard cap per phase
+    "NUM_EPISODES":           200,    # legacy fallback (ignored in full curriculum)
     "CHECKPOINT_EVERY": 10,
 
     # Paths (relative to gpu_rl_trading/)
