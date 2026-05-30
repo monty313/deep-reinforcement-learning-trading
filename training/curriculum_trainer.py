@@ -40,7 +40,7 @@ def _paths(cfg: dict, phase: int, run_id: str) -> dict:
     base = Path(cfg["PATHS"]["weights_dir"]) / run_id / f"phase{phase}"
     base.mkdir(parents=True, exist_ok=True)
     return {
-        "weights": str(base / "weights.h5"),
+        "weights": str(base / "weights.weights.h5"),
         "replay":  str(base / "replay.pkl"),
         "risk":    str(base / "risk.pkl"),
         "trades":  str(base / "trades.pkl"),
@@ -51,7 +51,7 @@ def _paths(cfg: dict, phase: int, run_id: str) -> dict:
 
 def _latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
     """Return the most recently modified .h5 file in ckpt_dir, or None."""
-    files = sorted(ckpt_dir.glob("*.h5"), key=lambda p: p.stat().st_mtime)
+    files = sorted(ckpt_dir.glob("*.weights.h5"), key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None
 
 
@@ -233,7 +233,7 @@ def run_phase(
 
         # ── checkpoint every N episodes ───────────────────────────────────────
         if episode % checkpoint_every == 0:
-            ckpt_file = ckpt_dir / f"{sym_slug}_model_ep{episode:04d}.h5"
+            ckpt_file = ckpt_dir / f"{sym_slug}_model_ep{episode:04d}.weights.h5"
             agent.q_net.save_weights(str(ckpt_file))
             print(f"  [ckpt] saved {ckpt_file.name}", flush=True)
 
