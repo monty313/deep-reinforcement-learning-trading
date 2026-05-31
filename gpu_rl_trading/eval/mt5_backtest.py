@@ -211,6 +211,7 @@ def run_mt5_backtest(
 
     cfg["STATE_DIM"]      = env.state_dim
     cfg["BATCH_SIZE_ENV"] = 1
+    cfg["MEMORY_SIZE"]    = 1   # no replay buffer needed for inference
     agent = DQNAgent(env.state_dim, NUM_ACTIONS, cfg, device)
 
     if ckpt_state_dim != env.state_dim:

@@ -324,8 +324,9 @@ def run_backtest(
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     ckpt_state_dim = ckpt.get("state_dim", env.state_dim)
 
-    cfg["STATE_DIM"] = env.state_dim
+    cfg["STATE_DIM"]      = env.state_dim
     cfg["BATCH_SIZE_ENV"] = 1   # sequential env uses B=1
+    cfg["MEMORY_SIZE"]    = 1   # no replay buffer needed for inference
     agent = DQNAgent(env.state_dim, NUM_ACTIONS, cfg, device)
 
     if ckpt_state_dim != env.state_dim:
