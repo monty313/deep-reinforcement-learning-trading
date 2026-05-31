@@ -248,6 +248,8 @@ def run_phase(
         ftmo_summary = env.episode_summary()
 
         # ── per-batch consecutive PASS tracking (within this episode only) ──────
+        # consec_pass[b] = best streak this batch item has achieved in any
+        # episode so far this phase. best_consec = max across all batch items.
         ep_best_consec = 0
         batch_logs = {b: [] for b in range(B)}
         for row in env.daily_metrics_log:
@@ -262,10 +264,11 @@ def run_phase(
                     ep_max_streak = max(ep_max_streak, streak)
                 else:
                     streak = 0
+            # reset each episode — 5 consecutive PASSes must happen within one episode
             consec_pass[b] = ep_max_streak
             ep_best_consec = max(ep_best_consec, ep_max_streak)
 
-        best_consec = max(best_consec, ep_best_consec)
+        best_consec = ep_best_consec
 
         # ── episode-level Φ shaping bonus ─────────────────────────────────────
         shaper.global_ep = global_ep
