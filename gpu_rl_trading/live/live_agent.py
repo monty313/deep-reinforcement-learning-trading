@@ -17,22 +17,52 @@ SETUP (run this FIRST, before starting the EA):
   5. Then attach the FTMO_DQN EA to any chart in MT5
 
 SHARED FILES (EA and Python use these to communicate):
-  The EA writes to:   C:/MT5Bridge/bar_data.csv
-  Python writes to:   C:/MT5Bridge/action.txt
-  Python writes to:   C:/MT5Bridge/agent_ready.txt  (signals EA that Python is running)
+  Both read/write from the FTMO MT5 terminal sandbox:
+    C:/Users/user/AppData/Roaming/MetaQuotes/Terminal/49CDDEAA95A409ED22BD2287BB67CB9C/MQL5/Files/
+  
+  Specifically:
+  The EA writes to:   bar_data.csv
+  Python writes to:   action.txt
+  Python writes to:   agent_ready.txt  (signals EA that Python is running)
 
 All paths can be changed via --bridge-dir argument.
 """
 from __future__ import annotations
 
 import argparse
+import errno
 import time
 import sys
 from collections import deque
 from pathlib import Path
 from datetime import datetime
 
-import numpy as np
+# Ensure the repository root is on sys.path so the package imports work
+# when the file is executed directly (e.g. `python live_agent.py`).
+import sys, os
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+# Pre-check NumPy compatibility: many compiled extensions require NumPy 2.0
+# or modules must be compiled against NumPy 2. If NumPy>=2 is present but
+# other modules were built for NumPy 1.x, runtime crashes can occur.
+try:
+    import numpy as np
+    try:
+        major = int(np.__version__.split('.')[0])
+    except Exception:
+        major = 0
+    if major >= 2:
+        print("[agent] ERROR: Detected numpy>=2 which may be incompatible with some compiled modules (e.g. torch extensions).",
+              flush=True)
+        print("[agent] Recommended: run: pip install \"numpy<2\" and restart the agent, or rebuild affected modules.", flush=True)
+        sys.exit(1)
+except Exception as e:
+    print(f"[agent] ERROR: Failed to import numpy: {e}", flush=True)
+    print("[agent] Try installing 'numpy<2' or upgrading dependent modules.", flush=True)
+    sys.exit(1)
+
 import torch
 
 from gpu_rl_trading.config.settings import CFG
@@ -121,11 +151,49 @@ def get_state(features: np.ndarray, cfg: dict, device: torch.device) -> torch.Te
     return torch.cat(parts, dim=1)   # (1, state_dim)
 
 
+def safe_read_text(path: Path, retries: int = 20, delay: float = 0.05) -> str:
+    last_exc = None
+    for _ in range(retries):
+        try:
+            return path.read_text().strip()
+        except PermissionError as e:
+            last_exc = e
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN):
+                last_exc = e
+            else:
+                raise
+        time.sleep(delay)
+    raise last_exc
+
+
+def safe_write_text(path: Path, text: str, retries: int = 20, delay: float = 0.05) -> None:
+    last_exc = None
+    for _ in range(retries):
+        try:
+            path.write_text(text)
+            return
+        except PermissionError as e:
+            last_exc = e
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EAGAIN):
+                last_exc = e
+            else:
+                raise
+        time.sleep(delay)
+    raise last_exc
+
+
 def run_agent(
     checkpoint_path: str,
-    bridge_dir:      str  = "C:/MT5Bridge",
+    bridge_dir:      str  = None,
     poll_ms:         int  = 100,    # how often to check for new bar (milliseconds)
 ):
+    # Default to FTMO MT5 terminal's sandbox folder
+    # The EA uses FILE_WRITE (no FILE_COMMON), so it writes to its own terminal's MQL5\Files folder
+    # FTMO terminal ID: 49CDDEAA95A409ED22BD2287BB67CB9C
+    if bridge_dir is None:
+        bridge_dir = str(Path.home() / "AppData/Roaming/MetaQuotes/Terminal/49CDDEAA95A409ED22BD2287BB67CB9C/MQL5/Files")
     bridge = Path(bridge_dir)
     bridge.mkdir(parents=True, exist_ok=True)
 
@@ -147,7 +215,7 @@ def run_agent(
     bar_buffer: deque = deque(maxlen=MIN_BARS + 100)
 
     # signal EA that Python is ready
-    ready_file.write_text("ready")
+    safe_write_text(ready_file, "ready")
     print(f"[agent] Ready. Waiting for bars from MT5 ...", flush=True)
     print(f"[agent] Bridge dir: {bridge}", flush=True)
     print(f"[agent] Watching:   {bar_file}", flush=True)
@@ -163,7 +231,13 @@ def run_agent(
 
             # read bar file written by EA
             # format: symbol,time,open,high,low,close,volume
-            content = bar_file.read_text().strip()
+            try:
+                content = safe_read_text(bar_file)
+            except Exception as e:
+                print(f"[agent] WARNING: unable to read {bar_file}: {e}. Retrying...", flush=True)
+                time.sleep(poll_ms / 1000)
+                continue
+
             if not content or content == last_bar_time:
                 time.sleep(poll_ms / 1000)
                 continue
@@ -188,7 +262,10 @@ def run_agent(
 
             if bars_received < MIN_BARS:
                 # not enough bars yet — tell EA to stay flat
-                action_file.write_text("0")
+                try:
+                    safe_write_text(action_file, "0")
+                except Exception as e:
+                    print(f"[agent] WARNING: unable to write {action_file}: {e}", flush=True)
                 if bars_received % 100 == 0:
                     print(f"[agent] Warming up: {bars_received}/{MIN_BARS} bars",
                           flush=True)
@@ -203,7 +280,10 @@ def run_agent(
                 action = int(q_vals.argmax(dim=1).item())
 
             # write action for EA to read
-            action_file.write_text(str(action))
+            try:
+                safe_write_text(action_file, str(action))
+            except Exception as e:
+                print(f"[agent] WARNING: unable to write {action_file}: {e}", flush=True)
 
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] {symbol} bar={bar_time}  "
@@ -217,7 +297,10 @@ def run_agent(
         except KeyboardInterrupt:
             print("\n[agent] Stopped by user.", flush=True)
             ready_file.unlink(missing_ok=True)
-            action_file.write_text("0")
+            try:
+                safe_write_text(action_file, "0")
+            except Exception as e:
+                print(f"[agent] WARNING: unable to write {action_file} on shutdown: {e}", flush=True)
             break
         except Exception as e:
             print(f"[agent] ERROR: {e}", flush=True)
@@ -228,8 +311,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Live DQN agent for FTMO trading")
     parser.add_argument("--checkpoint", required=True,
                         help="Path to trained .pt checkpoint")
-    parser.add_argument("--bridge-dir", default="C:/MT5Bridge",
-                        help="Shared folder for MT5 communication (default: C:/MT5Bridge)")
+    parser.add_argument("--bridge-dir", default=None,
+                        help="Bridge folder (default: MT5 Common Files/MT5Bridge)")
     parser.add_argument("--poll-ms", type=int, default=100,
                         help="Polling interval in ms (default: 100)")
     args = parser.parse_args()

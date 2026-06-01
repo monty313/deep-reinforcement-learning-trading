@@ -11,6 +11,12 @@
 //| REQUIRES: Tools → Options → Expert Advisors                      |
 //|   ✓ Allow automated trading                                      |
 //|   ✓ Allow DLL imports  (for file read/write)                     |
+//|                                                                  |
+//| NOTE: If the Experts log says "agent_ready.txt not found" or
+//|       shows a path like MT5Bridge\agent_ready.txt, then Python is
+//|       writing to the wrong folder or MT5 is still running an old
+//|       compiled EA copy. Recompile and reattach the EA after
+//|       starting Python with the correct --bridge-dir path.
 //+------------------------------------------------------------------+
 #property copyright "FTMO DQN Agent"
 #property version   "1.00"
@@ -20,7 +26,9 @@
 #include <Trade\SymbolInfo.mqh>
 
 //── Inputs ────────────────────────────────────────────────────────────────────
-input string   BridgeDir          = "C:\\MT5Bridge";     // Shared folder path (must match Python)
+// NOTE: BridgeDir is now unused. The EA uses its own terminal's MQL5\Files sandbox.
+//       Python must read/write from: C:\Users\user\AppData\Roaming\MetaQuotes\Terminal\49CDDEAA95A409ED22BD2287BB67CB9C\MQL5\Files\
+input string   BridgeDir          = "MT5Bridge";         // DEPRECATED (kept for reference only)
 input double   AccountSize        = 100000.0;            // FTMO account size ($)
 input double   HardStopDD_Pct     = 2.0;                 // Hard stop: max daily drawdown %
 input double   HardStopProfit_Pct = 3.0;                 // Hard stop: max daily profit %
@@ -44,7 +52,7 @@ string CommoditySymbols[] = {"XAUUSD.sim","USOIL.sim","XAGUSD.sim"};
 //── State variables ───────────────────────────────────────────────────────────
 CTrade  Trade;
 int     LastAction        = 0;
-string  LastBarTime       = "";
+string  LastBarTimes[];   // per-symbol last processed bar time
 double  DayStartBalance   = 0.0;
 bool    TradingBlocked    = false;
 int     TradesToday       = 0;
@@ -57,32 +65,79 @@ string BarFile;
 string ActionFile;
 string ReadyFile;
 
+void PrintBridgeHelp(const string sandboxPath)
+{
+    Print("[EA] Bridge Diagnostics:");
+    Print("[EA] 1) Expected Python bridge folder: ", sandboxPath);
+    Print("[EA] 2) Make sure live_agent.py is running with:");
+    Print("[EA]      python -m gpu_rl_trading.live.live_agent --checkpoint \"<path>\" --bridge-dir \"" + sandboxPath + "\"");
+    Print("[EA] 3) Recompile this EA in MetaEditor and reattach it to the chart.");
+    Print("[EA] 4) Make sure this EA is loaded from the terminal's MQL5\\Experts folder, not from a stale copy.");
+    Print("[EA] 5) Do NOT use C:\\MT5Bridge for this terminal: MT5 sandbox I/O only sees its own MQL5\\Files folder.");
+    Print("[EA] Common failure modes:");
+    Print("[EA]  - Python is not started yet");
+    Print("[EA]  - Python is using the wrong --bridge-dir folder");
+    Print("[EA]  - MT5 is still running an old compiled EA copy");
+    Print("[EA]  - agent_ready.txt is in C:\\MT5Bridge instead of the terminal sandbox");
+}
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
     Trade.SetExpertMagicNumber(MagicNumber);
     Trade.SetDeviationInPoints(10);
 
-    BarFile    = BridgeDir + "\\bar_data.csv";
-    ActionFile = BridgeDir + "\\action.txt";
-    ReadyFile  = BridgeDir + "\\agent_ready.txt";
+    // Files are relative to terminal sandbox: MQL5\Files\
+    // Python must write to: C:\Users\user\AppData\Roaming\MetaQuotes\Terminal\49CDDEAA95A409ED22BD2287BB67CB9C\MQL5\Files\
+    BarFile    = "bar_data.csv";
+    ActionFile = "action.txt";
+    ReadyFile  = "agent_ready.txt";
+    FolderCreate(".", 0);
 
     // Build full symbol list: forex + indices + commodities
-    int nF = ArraySize(ForexSymbols);
-    int nI = ArraySize(IndexSymbols);
-    int nC = ArraySize(CommoditySymbols);
-    TotalSymbols = nF + nI + nC;
-    ArrayResize(AllSymbols, TotalSymbols);
+    // Auto-detect actual broker symbol names (handles .sim, no suffix, .r, etc.)
+    string baseForex[]     = {"EURUSD","AUDUSD","USDCAD","USDCHF","NZDUSD","AUDCAD",
+                               "USDSEK","AUDCHF","CADCHF","EURAUD","EURCAD","EURCHF",
+                               "EURNZD","EURSEK","NZDCAD","NZDCHF","GBPJPY"};
+    string baseIndices[]   = {"US100","US500","US30"};
+    string baseCommodities[]= {"XAUUSD","USOIL","XAGUSD"};
+
+    int nF = ArraySize(baseForex);
+    int nI = ArraySize(baseIndices);
+    int nC = ArraySize(baseCommodities);
+    int nAll = nF + nI + nC;
+    ArrayResize(AllSymbols, nAll);
+    ArrayResize(LastBarTimes, nAll);
+
     int idx = 0;
-    for(int i = 0; i < nF; i++) AllSymbols[idx++] = ForexSymbols[i];
-    for(int i = 0; i < nI; i++) AllSymbols[idx++] = IndexSymbols[i];
-    for(int i = 0; i < nC; i++) AllSymbols[idx++] = CommoditySymbols[i];
+    for(int i = 0; i < nF; i++)  { AllSymbols[idx] = ResolveSymbol(baseForex[i]);      LastBarTimes[idx] = ""; idx++; }
+    for(int i = 0; i < nI; i++)  { AllSymbols[idx] = ResolveSymbol(baseIndices[i]);    LastBarTimes[idx] = ""; idx++; }
+    for(int i = 0; i < nC; i++)  { AllSymbols[idx] = ResolveSymbol(baseCommodities[i]); LastBarTimes[idx] = ""; idx++; }
+
+    // remove any symbols that couldn't be resolved
+    TotalSymbols = 0;
+    for(int i = 0; i < nAll; i++)
+    {
+        if(AllSymbols[i] != "")
+        {
+            AllSymbols[TotalSymbols]   = AllSymbols[i];
+            LastBarTimes[TotalSymbols] = "";
+            TotalSymbols++;
+        }
+    }
+    ArrayResize(AllSymbols,   TotalSymbols);
+    ArrayResize(LastBarTimes, TotalSymbols);
 
     // Check Python agent is running
+    string sandboxPath = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\";
+    Print("[EA] Sandbox Files path: ", sandboxPath);
+    Print("[EA] Point Python --bridge-dir to this folder");
     if(!FileIsExist(ReadyFile))
     {
-        Print("[EA] WARNING: agent_ready.txt not found. Start live_agent.py first!");
-        Print("[EA] Expected at: ", ReadyFile);
+        Print("[EA] WARNING: agent_ready.txt not found in the EA sandbox.");
+        Print("[EA] This means Python is not writing to the terminal's MQL5\\Files folder.");
+        Print("[EA] agent_ready.txt must be in: ", sandboxPath);
+        PrintBridgeHelp(sandboxPath);
     }
     else
     {
@@ -145,8 +200,7 @@ void ProcessSymbol(string sym, int symIdx)
 
     // Only act on a new completed bar (bar[1] is the just-closed bar)
     string barTime = TimeToString(rates[1].time, TIME_DATE|TIME_MINUTES);
-    string barKey  = sym + "_" + barTime;
-    if(barKey == LastBarTime) return;
+    if(barTime == LastBarTimes[symIdx]) return;   // already processed this bar for this symbol
 
     // ── Spread filter ─────────────────────────────────────────────
     if(!SpreadOK(sym, rates[1].close)) return;
@@ -159,13 +213,28 @@ void ProcessSymbol(string sym, int symIdx)
 
     // ── Read action from Python ───────────────────────────────────
     int action = ReadAction();
-    LastBarTime = barKey;
+    LastBarTimes[symIdx] = barTime;
 
     if(PrintDebug)
         Print("[EA] ", sym, " bar=", barTime, "  action=", action);
 
     // ── Execute action ────────────────────────────────────────────
     ExecuteAction(sym, action, rates[1].close);
+}
+
+//+------------------------------------------------------------------+
+string ResolveSymbol(string base)
+{
+    // Try exact name first, then common suffixes
+    string suffixes[] = {"", ".sim", ".r", "m", ".pro", ".ecn"};
+    for(int i = 0; i < ArraySize(suffixes); i++)
+    {
+        string candidate = base + suffixes[i];
+        if(SymbolInfoInteger(candidate, SYMBOL_SELECT) || SymbolSelect(candidate, true))
+            return candidate;
+    }
+    Print("[EA] WARNING: Could not resolve symbol: ", base, " — skipping");
+    return "";
 }
 
 //+------------------------------------------------------------------+
@@ -220,10 +289,11 @@ void WriteBarFile(string sym, MqlRates &bar)
                   DoubleToString(bar.close, 5) + "," +
                   DoubleToString((double)bar.tick_volume, 1);
 
-    int handle = FileOpen(BarFile, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+    int handle = FileOpen(BarFile, FILE_WRITE|FILE_TXT|FILE_ANSI);
     if(handle == INVALID_HANDLE)
     {
         Print("[EA] ERROR writing bar file: ", GetLastError());
+        Print("[EA] Check that the terminal sandbox folder exists and this EA is attached to the correct MT5 terminal.");
         return;
     }
     FileWriteString(handle, line);
@@ -233,9 +303,14 @@ void WriteBarFile(string sym, MqlRates &bar)
 //+------------------------------------------------------------------+
 int ReadAction()
 {
-    if(!FileIsExist(ActionFile)) return 0;
+    if(!FileIsExist(ActionFile))
+    {
+        if(PrintDebug)
+            Print("[EA] Note: action.txt not found. Python may not have written a response yet or may be using the wrong bridge folder.");
+        return 0;
+    }
 
-    int handle = FileOpen(ActionFile, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
+    int handle = FileOpen(ActionFile, FILE_READ|FILE_TXT|FILE_ANSI);
     if(handle == INVALID_HANDLE) return 0;
 
     string content = FileReadString(handle);
@@ -341,10 +416,25 @@ double CalcLots(string sym, int action, double close)
 
     lots = MathMax(lots, minLot);
     lots = MathMin(lots, maxLot);
+
+    // clamp to available free margin (never use more than 10% of free margin per trade)
+    double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+    double marginPer1Lot = 0;
+    if(!OrderCalcMargin(ORDER_TYPE_SELL, sym, 1.0,
+                        SymbolInfoDouble(sym, SYMBOL_BID), marginPer1Lot))
+        marginPer1Lot = freeMargin;  // fallback: assume 1 lot uses all margin
+    if(marginPer1Lot > 0)
+    {
+        double maxAffordableLots = (freeMargin * 0.10) / marginPer1Lot;
+        lots = MathMin(lots, maxAffordableLots);
+    }
+
+    lots = MathMax(lots, minLot);
     // round to lot step
     if(lotStep > 0)
-        lots = MathRound(lots / lotStep) * lotStep;
+        lots = MathFloor(lots / lotStep) * lotStep;
 
+    if(lots < minLot) return 0;  // can't afford even min lot
     return lots;
 }
 
